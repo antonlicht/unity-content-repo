@@ -1,0 +1,207 @@
+.cs-root {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.cs-top-bar {
+    flex-direction: row;
+    align-items: center;
+    padding: 6px 8px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.25);
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.cs-title {
+    -unity-font-style: bold;
+    font-size: 13px;
+}
+
+.cs-flex-spacer {
+    flex-grow: 1;
+}
+
+.cs-new-folder-row {
+    flex-direction: row;
+    align-items: center;
+    padding: 5px 8px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.2);
+    background-color: rgba(60, 120, 200, 0.08);
+}
+
+.cs-setup-banner {
+    margin: 8px;
+    padding: 10px;
+    border-width: 1px;
+    border-color: rgba(255, 180, 0, 0.6);
+    border-radius: 4px;
+    background-color: rgba(255, 180, 0, 0.12);
+    flex-direction: column;
+}
+
+.cs-setup-label {
+    white-space: normal;
+    margin-bottom: 8px;
+}
+
+.cs-primary {
+    align-self: flex-start;
+}
+
+.cs-folder-list {
+    flex-grow: 1;
+    padding: 4px;
+}
+
+.cs-folder-row {
+    flex-direction: row;
+    align-items: center;
+    padding: 6px 8px;
+    margin-bottom: 2px;
+    border-radius: 3px;
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+.cs-folder-row-body {
+    flex-direction: row;
+    align-items: center;
+    flex-grow: 1;
+}
+
+.cs-folder-row-commit {
+    flex-direction: row;
+    align-items: center;
+    margin-top: 4px;
+    display: none;
+}
+
+.cs-folder-row-commit--visible {
+    display: flex;
+}
+
+.cs-folder-row-container {
+    flex-direction: column;
+    flex-grow: 1;
+    padding: 6px 8px;
+    margin-bottom: 2px;
+    border-radius: 3px;
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+.cs-folder-name {
+    min-width: 140px;
+    -unity-font-style: bold;
+}
+
+.cs-badge {
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    -unity-text-align: middle-center;
+}
+
+.cs-badge--on {
+    background-color: rgba(60, 160, 90, 0.35);
+    color: rgb(220, 255, 230);
+}
+
+.cs-badge--off {
+    background-color: rgba(120, 120, 120, 0.35);
+    color: rgb(220, 220, 220);
+}
+
+.cs-badge--modified {
+    background-color: rgba(220, 160, 40, 0.45);
+    color: rgb(255, 240, 210);
+}
+
+.cs-badge--staged {
+    background-color: rgba(60, 160, 220, 0.45);
+    color: rgb(210, 240, 255);
+}
+
+.cs-icon-btn {
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    padding: 3px;
+    margin: 0 2px;
+    background-color: rgba(0, 0, 0, 0);
+    border-width: 0;
+    border-radius: 3px;
+    align-items: center;
+    justify-content: center;
+}
+
+.cs-icon-btn--lg {
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
+    padding: 4px;
+}
+
+.cs-icon-btn:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.cs-icon-btn.cs-danger:hover {
+    background-color: rgba(220, 80, 80, 0.2);
+}
+
+.cs-icon-image {
+    flex-grow: 1;
+    flex-shrink: 0;
+    -unity-background-scale-mode: scale-to-fit;
+}
+
+.cs-rename-field {
+    min-width: 80px;
+    max-width: 200px;
+    flex-shrink: 1;
+}
+
+.cs-commit-field {
+    flex-grow: 1;
+    margin-right: 4px;
+}
+
+.cs-danger {
+    color: rgb(255, 170, 170);
+}
+
+.cs-status-bar {
+    flex-direction: row;
+    align-items: center;
+    padding: 4px 8px;
+    border-top-width: 1px;
+    border-top-color: rgba(0, 0, 0, 0.25);
+    background-color: rgba(0, 0, 0, 0.05);
+    min-height: 22px;
+}
+
+.cs-status-label {
+    margin-left: 6px;
+    -unity-text-align: middle-left;
+}
+
+.cs-spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    border-width: 2px;
+    border-left-color: rgba(255, 255, 255, 0.85);
+    border-top-color: rgba(255, 255, 255, 0.25);
+    border-right-color: rgba(255, 255, 255, 0.25);
+    border-bottom-color: rgba(255, 255, 255, 0.25);
+    rotate: 0deg;
+    transition-property: rotate;
+    transition-duration: 1s;
+    transition-timing-function: linear;
+    display: none;
+}
+
+.cs-spinner--visible {
+    display: flex;
+}

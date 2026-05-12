@@ -1,0 +1,43 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements">
+    <ui:VisualElement class="cs-folder-row-container">
+
+        <ui:VisualElement name="row-body" class="cs-folder-row-body">
+            <ui:Label      name="folder-name-label"  class="cs-folder-name" />
+            <ui:TextField  name="folder-rename-field" class="cs-folder-name cs-rename-field" />
+
+            <ui:Button name="btn-rename" class="cs-icon-btn" tooltip="Rename folder">
+                <ui:Image name="img-rename" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Label name="folder-badge" class="cs-badge" />
+
+            <ui:VisualElement class="cs-flex-spacer" />
+
+            <ui:Button name="btn-pull" class="cs-icon-btn" tooltip="Pull latest changes from remote">
+                <ui:Image name="img-pull" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Button name="btn-push" class="cs-icon-btn" tooltip="Commit and push changes">
+                <ui:Image name="img-push" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Button name="btn-checkout" class="cs-icon-btn" tooltip="Check out this folder">
+                <ui:Image name="img-checkout" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Button name="btn-disconnect" class="cs-icon-btn" tooltip="Disconnect (remove local files)">
+                <ui:Image name="img-disconnect" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Button name="btn-delete-remote" class="cs-icon-btn cs-danger" tooltip="Delete folder from remote repository">
+                <ui:Image name="img-delete" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+        </ui:VisualElement>
+
+        <ui:VisualElement name="commit-row" class="cs-folder-row-commit">
+            <ui:TextField name="commit-message-field" class="cs-commit-field" />
+            <ui:Button    name="btn-commit-confirm"   text="Confirm" />
+        </ui:VisualElement>
+
+    </ui:VisualElement>
+</ui:UXML>
