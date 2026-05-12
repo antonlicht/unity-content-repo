@@ -1,6 +1,6 @@
 {
   "name": "com.antonlicht.content-repo",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "displayName": "Content Repo",
   "description": "Editor tooling for managing a team content repository via git sparse-checkout. Developers check out only the folders they need, pull, commit and push without touching the terminal.",
   "unity": "6000.0",
