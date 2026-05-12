@@ -1,0 +1,39 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:editor="UnityEditor.UIElements">
+    <ui:VisualElement name="root" class="cs-root">
+
+        <ui:VisualElement name="top-bar" class="cs-top-bar">
+            <ui:Label name="title-label" text="Content Browser" class="cs-title" />
+            <ui:VisualElement class="cs-flex-spacer" />
+            <ui:Button name="btn-new-folder" class="cs-icon-btn cs-icon-btn--lg" tooltip="New folder">
+                <ui:Image name="img-new-folder" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+            <ui:Button name="btn-refresh" class="cs-icon-btn cs-icon-btn--lg" tooltip="Refresh folder list">
+                <ui:Image name="img-refresh" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+            <ui:Button name="btn-pull-all" class="cs-icon-btn cs-icon-btn--lg" tooltip="Pull all checked-out folders">
+                <ui:Image name="img-pull-all" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+        </ui:VisualElement>
+
+        <ui:VisualElement name="new-folder-row" class="cs-new-folder-row">
+            <ui:TextField name="new-folder-field" class="cs-commit-field"
+                          tooltip="Enter a folder name, then click Create" />
+            <ui:Button name="btn-create-folder" text="Create" />
+        </ui:VisualElement>
+
+        <ui:VisualElement name="setup-banner" class="cs-setup-banner">
+            <ui:Label
+                text="The content repository has not been initialized yet. Configure its remote URL and local path under Project Settings &gt; Content Repo, then click Initialize."
+                class="cs-setup-label" />
+            <ui:Button name="btn-init" text="Initialize" class="cs-primary" />
+        </ui:VisualElement>
+
+        <ui:ScrollView name="folder-list-container" class="cs-folder-list" />
+
+        <ui:VisualElement name="status-bar" class="cs-status-bar">
+            <ui:VisualElement name="progress-spinner" class="cs-spinner" />
+            <ui:Label name="status-label" text="" class="cs-status-label" />
+        </ui:VisualElement>
+
+    </ui:VisualElement>
+</ui:UXML>
