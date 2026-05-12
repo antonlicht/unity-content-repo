@@ -324,10 +324,13 @@ namespace ContentRepo.Editor
             {
                 try { Directory.Delete(localFolder, true); }
                 catch (Exception ex) { UnityEngine.Debug.LogWarning($"Failed to delete local folder '{localFolder}': {ex.Message}"); }
+            }
 
-                var meta = localFolder + ".meta";
-                if (File.Exists(meta))
-                    File.Delete(meta);
+            var meta = localFolder + ".meta";
+            if (File.Exists(meta))
+            {
+                try { File.Delete(meta); }
+                catch (Exception ex) { UnityEngine.Debug.LogWarning($"Failed to delete meta '{meta}': {ex.Message}"); }
             }
 
             NotifyChange();
