@@ -439,21 +439,16 @@ namespace ContentRepo.Editor
             var pushBtn       = row.Q<Button>("btn-push");
             var checkoutBtn   = row.Q<Button>("btn-checkout");
             var disconnectBtn = row.Q<Button>("btn-disconnect");
-            var deleteBtn     = row.Q<Button>("btn-delete-remote");
-            var expandBtn     = row.Q<Button>("btn-expand");
-            var commitRow     = row.Q<VisualElement>("commit-row");
-            var fileList      = row.Q<VisualElement>("file-list");
-            var commitField   = row.Q<TextField>("commit-message-field");
-            var commitConfirm = row.Q<Button>("btn-commit-confirm");
+            var deleteBtn = row.Q<Button>("btn-delete-remote");
+            var expandBtn = row.Q<Button>("btn-expand");
+            var fileList  = row.Q<VisualElement>("file-list");
 
             nameLabel.text = folder;
             renameField.style.display = DisplayStyle.None;
-            commitRow.style.display = DisplayStyle.None;
             checkoutBtn.style.display  = isCheckedOut ? DisplayStyle.None : DisplayStyle.Flex;
             disconnectBtn.style.display = isCheckedOut ? DisplayStyle.Flex : DisplayStyle.None;
 
             var expanded = false;
-            var commitRowVisible = false;
             FolderStatus latestStatus = status;
 
             // per-row selection state: repoRoot-relative paths → their ChangeKind
@@ -576,12 +571,7 @@ namespace ContentRepo.Editor
                             _ = RunAsync("Deleting files…", () => ContentGitApi.DeleteLocalFilesAsync(paths));
                         });
 
-                    evt.menu.AppendAction($"Commit and push ({label})…", _a =>
-                    {
-                        commitRowVisible = true;
-                        commitRow.style.display = DisplayStyle.Flex;
-                        commitField.Focus();
-                    });
+                    evt.menu.AppendAction($"Commit and push ({label})…", _a => PromptAndCommit());
                 }));
 
                 return entry;
@@ -619,14 +609,17 @@ namespace ContentRepo.Editor
             disconnectBtn.clicked += () => { if (EditorUtility.DisplayDialog("Disconnect", $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel")) _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder)); };
             pullBtn.clicked += () => _ = RunAsync($"Pulling '{folder}'…", () => ContentGitApi.PullFolderAsync(folder));
 
-            pushBtn.clicked += () => { commitRowVisible = !commitRowVisible; commitRow.style.display = commitRowVisible ? DisplayStyle.Flex : DisplayStyle.None; if (commitRowVisible) commitField.Focus(); };
-            commitConfirm.clicked += () =>
+            void PromptAndCommit()
             {
-                var msg = commitField.value?.Trim();
-                if (string.IsNullOrEmpty(msg)) { EditorUtility.DisplayDialog("Message required", "Enter a commit message.", "OK"); return; }
-                commitRowVisible = false; commitRow.style.display = DisplayStyle.None; commitField.SetValueWithoutNotify("");
-                _ = RunAsync($"Committing '{folder}'…", () => ContentGitApi.CommitAndPushFolderAsync(folder, msg));
-            };
+                var autoMsg   = $"Content Updates {folder}";
+                var fileNames = (latestStatus.Files ?? new List<FileChange>())
+                    .Select(f => f.Path.Length > folder.Length + 1 ? f.Path.Substring(folder.Length + 1) : f.Path)
+                    .ToList();
+                CommitConfirmWindow.Show(autoMsg, fileNames,
+                    msg => _ = RunAsync($"Committing '{folder}'…", () => ContentGitApi.CommitAndPushFolderAsync(folder, msg)));
+            }
+
+            pushBtn.clicked += () => PromptAndCommit();
             deleteBtn.clicked += () => { if (EditorUtility.DisplayDialog("Delete remote", $"Permanently delete '{folder}' from the remote?\nThis cannot be undone.", "Delete", "Cancel")) _ = RunAsync($"Deleting '{folder}'…", () => ContentGitApi.DeleteRemoteFolderAsync(folder)); };
 
             return row;
