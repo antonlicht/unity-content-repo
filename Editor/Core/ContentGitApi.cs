@@ -509,11 +509,13 @@ namespace ContentRepo.Editor
         /// <summary>Deletes untracked local files (and their .meta counterparts) from disk.</summary>
         public static async Task DeleteLocalFilesAsync(IEnumerable<string> repoPaths)
         {
+            var basePath = ContentAbsolutePath;          // evaluate on main thread
+            var paths    = repoPaths.ToList();           // materialise on main thread
             await Task.Run(() =>
             {
-                foreach (var rel in repoPaths)
+                foreach (var rel in paths)
                 {
-                    var full = Path.Combine(ContentAbsolutePath, rel.Replace('/', Path.DirectorySeparatorChar));
+                    var full = Path.Combine(basePath, rel.Replace('/', Path.DirectorySeparatorChar));
                     if (File.Exists(full)) File.Delete(full);
                     var meta = full + ".meta";
                     if (File.Exists(meta)) File.Delete(meta);

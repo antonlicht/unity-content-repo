@@ -70,16 +70,6 @@
     padding: 4px 8px;
 }
 
-.cs-folder-row-commit {
-    flex-direction: row;
-    align-items: center;
-    margin: 2px 8px 4px 8px;
-    display: none;
-}
-
-.cs-folder-row-commit--visible {
-    display: flex;
-}
 
 .cs-folder-row-container {
     flex-direction: column;
@@ -180,10 +170,6 @@
     flex-shrink: 1;
 }
 
-.cs-commit-field {
-    flex-grow: 1;
-    margin-right: 4px;
-}
 
 .cs-danger {
     color: rgb(255, 170, 170);
