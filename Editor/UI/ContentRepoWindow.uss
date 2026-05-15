@@ -57,8 +57,8 @@
 .cs-folder-row {
     flex-direction: row;
     align-items: center;
-    padding: 6px 8px;
-    margin-bottom: 2px;
+    padding: 4px 8px;
+    margin-bottom: 1px;
     border-radius: 3px;
     background-color: rgba(0, 0, 0, 0.04);
 }
@@ -67,12 +67,13 @@
     flex-direction: row;
     align-items: center;
     flex-grow: 1;
+    padding: 4px 8px;
 }
 
 .cs-folder-row-commit {
     flex-direction: row;
     align-items: center;
-    margin-top: 4px;
+    margin: 2px 8px 4px 8px;
     display: none;
 }
 
@@ -83,22 +84,29 @@
 .cs-folder-row-container {
     flex-direction: column;
     flex-grow: 1;
-    padding: 6px 8px;
-    margin-bottom: 2px;
+    margin-bottom: 1px;
     border-radius: 3px;
     background-color: rgba(0, 0, 0, 0.04);
+    overflow: hidden;
 }
 
 .cs-folder-name {
-    min-width: 140px;
+    min-width: 120px;
+    font-size: 12px;
     -unity-font-style: bold;
 }
 
-.cs-badge {
+.cs-badge-group {
+    flex-direction: row;
+    align-items: center;
     margin-left: 8px;
+}
+
+.cs-badge {
     padding: 1px 6px;
     border-radius: 3px;
     font-size: 10px;
+    margin-right: 3px;
     -unity-text-align: middle-center;
 }
 
@@ -112,9 +120,19 @@
     color: rgb(220, 220, 220);
 }
 
+.cs-badge--new {
+    background-color: rgba(60, 160, 90, 0.42);
+    color: rgb(180, 255, 200);
+}
+
 .cs-badge--modified {
-    background-color: rgba(220, 160, 40, 0.45);
-    color: rgb(255, 240, 210);
+    background-color: rgba(200, 150, 30, 0.45);
+    color: rgb(255, 240, 200);
+}
+
+.cs-badge--deleted {
+    background-color: rgba(200, 65, 65, 0.42);
+    color: rgb(255, 200, 200);
 }
 
 .cs-badge--staged {
@@ -205,3 +223,228 @@
 .cs-spinner--visible {
     display: flex;
 }
+
+.cs-tab-bar {
+    flex-direction: row;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.25);
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.cs-tab {
+    padding: 6px 14px;
+    margin: 0;
+    border-width: 0;
+    border-bottom-width: 2px;
+    border-bottom-color: rgba(0, 0, 0, 0);
+    background-color: rgba(0, 0, 0, 0);
+    border-radius: 0;
+}
+
+.cs-tab:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.cs-tab--active {
+    border-bottom-color: rgb(80, 150, 220);
+    -unity-font-style: bold;
+}
+
+.cs-panel {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.cs-inline-label {
+    margin: 0 4px 0 6px;
+    -unity-text-align: middle-left;
+}
+
+.cs-inline-result {
+    margin: 0 8px 4px 8px;
+    white-space: normal;
+}
+
+.cs-enum {
+    min-width: 110px;
+    margin-right: 8px;
+}
+
+.cs-text-btn {
+    margin: 0 2px;
+    padding: 2px 8px;
+}
+
+.cs-primary-btn {
+    -unity-font-style: bold;
+}
+
+.cs-section-label {
+    margin: 4px 8px 2px 8px;
+    -unity-font-style: bold;
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+.cs-empty-label {
+    margin: 8px;
+    -unity-font-style: italic;
+    opacity: 0.7;
+}
+
+.cs-log {
+    max-height: 140px;
+    min-height: 60px;
+    margin: 0 8px 8px 8px;
+    padding: 4px;
+    border-width: 1px;
+    border-color: rgba(0, 0, 0, 0.3);
+    border-radius: 3px;
+    background-color: rgba(0, 0, 0, 0.15);
+}
+
+.cs-log-text {
+    white-space: normal;
+    font-size: 10px;
+    color: rgba(220, 220, 220, 0.9);
+}
+
+.cs-pipeline-row {
+    flex-direction: row;
+    align-items: center;
+    padding: 4px 8px;
+    margin-bottom: 2px;
+    border-radius: 3px;
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+.cs-pipeline-name {
+    min-width: 160px;
+    -unity-font-style: bold;
+}
+
+.cs-pipeline-meta {
+    margin-left: 8px;
+    font-size: 10px;
+    opacity: 0.7;
+}
+
+.cs-pipeline-status {
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    -unity-text-align: middle-center;
+}
+
+.cs-pipeline-status--idle {
+    background-color: rgba(120, 120, 120, 0.35);
+    color: rgb(220, 220, 220);
+}
+
+.cs-pipeline-status--ok {
+    background-color: rgba(60, 160, 90, 0.35);
+    color: rgb(220, 255, 230);
+}
+
+.cs-pipeline-status--err {
+    background-color: rgba(200, 80, 80, 0.45);
+    color: rgb(255, 220, 220);
+}
+
+.cs-pipeline-status--running {
+    background-color: rgba(60, 160, 220, 0.45);
+    color: rgb(210, 240, 255);
+}
+
+.cs-gen-warning {
+    margin: 6px 8px;
+    padding: 8px 10px;
+    border-width: 1px;
+    border-color: rgba(255, 140, 0, 0.7);
+    border-radius: 4px;
+    background-color: rgba(255, 140, 0, 0.12);
+    flex-direction: column;
+}
+
+.cs-row-actions {
+    flex-direction: row;
+    margin-top: 6px;
+}
+
+.cs-build-meta {
+    font-size: 10px;
+    opacity: 0.65;
+    margin-left: 6px;
+}
+
+.cs-expand-btn {
+    width: 14px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0;
+    margin: 0 3px 0 0;
+    border-width: 0;
+    font-size: 8px;
+    color: rgba(160, 160, 160, 0.6);
+    background-color: rgba(0, 0, 0, 0);
+}
+
+.cs-expand-btn:hover {
+    color: rgba(210, 210, 210, 0.9);
+    background-color: rgba(0, 0, 0, 0);
+}
+
+.cs-file-list {
+    flex-direction: column;
+    padding-bottom: 3px;
+    background-color: rgba(0, 0, 0, 0.15);
+}
+
+.cs-file-entry {
+    flex-direction: row;
+    align-items: center;
+    padding: 2px 8px 2px 24px;
+    cursor: link;
+}
+
+.cs-file-entry:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.cs-file-entry--selected {
+    background-color: rgba(44, 93, 135, 0.75);
+}
+
+.cs-file-entry--selected:hover {
+    background-color: rgba(44, 93, 135, 0.9);
+}
+
+.cs-file-prefix {
+    font-size: 10px;
+    min-width: 10px;
+    margin-right: 4px;
+    -unity-text-align: middle-center;
+    cursor: link;
+}
+
+.cs-file-name {
+    font-size: 11px;
+    cursor: link;
+}
+
+.cs-file-meta-indicator {
+    font-size: 9px;
+    margin-left: 5px;
+    opacity: 0.38;
+    cursor: link;
+}
+
+.cs-file-entry--added .cs-file-prefix    { color: rgb(100, 210, 120); }
+.cs-file-entry--modified .cs-file-prefix { color: rgb(220, 180, 60);  }
+.cs-file-entry--deleted .cs-file-prefix  { color: rgb(210, 90, 90);   }
+.cs-file-entry--deleted .cs-file-name    { opacity: 0.55; }
+
+.cs-file-entry--selected .cs-file-prefix { color: rgb(255, 255, 255); }
+.cs-file-entry--selected .cs-file-name   { color: rgb(255, 255, 255); }
+.cs-file-entry--selected .cs-file-meta-indicator { color: rgb(255, 255, 255); opacity: 0.55; }

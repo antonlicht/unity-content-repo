@@ -1,15 +1,11 @@
 {
-    "name": "ContentRepo.Editor",
-    "rootNamespace": "ContentRepo.Editor",
+    "name": "ContentRepo.Runtime",
+    "rootNamespace": "ContentRepo",
     "references": [
-        "ContentRepo.Runtime",
         "Unity.Addressables",
-        "Unity.Addressables.Editor",
         "Unity.ResourceManager"
     ],
-    "includePlatforms": [
-        "Editor"
-    ],
+    "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,

@@ -2,6 +2,8 @@
     <ui:VisualElement class="cs-folder-row-container">
 
         <ui:VisualElement name="row-body" class="cs-folder-row-body">
+            <ui:Button name="btn-expand" text="▶" class="cs-icon-btn cs-expand-btn" tooltip="Show changed files" style="display:none;" />
+
             <ui:Label      name="folder-name-label"  class="cs-folder-name" />
             <ui:TextField  name="folder-rename-field" class="cs-folder-name cs-rename-field" />
 
@@ -9,7 +11,7 @@
                 <ui:Image name="img-rename" class="cs-icon-image" picking-mode="Ignore" />
             </ui:Button>
 
-            <ui:Label name="folder-badge" class="cs-badge" />
+            <ui:VisualElement name="folder-badge-group" class="cs-badge-group" />
 
             <ui:VisualElement class="cs-flex-spacer" />
 
@@ -38,6 +40,8 @@
             <ui:TextField name="commit-message-field" class="cs-commit-field" />
             <ui:Button    name="btn-commit-confirm"   text="Confirm" />
         </ui:VisualElement>
+
+        <ui:VisualElement name="file-list" class="cs-file-list" style="display:none;" />
 
     </ui:VisualElement>
 </ui:UXML>

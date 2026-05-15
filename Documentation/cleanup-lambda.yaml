@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Content Repo — daily cleanup Lambda.
+  Reads delete-schedule.json from each generation prefix, deletes build folders whose
+  deleteAfter date has passed and which are no longer referenced by any manifest,
+  then updates the schedule file. Runs once per day via EventBridge.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: S3 bucket that holds content builds and manifests.
+  Region:
+    Type: String
+    Description: AWS region where the bucket lives (Lambda must be in the same region).
+
+Resources:
+
+  CleanupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: content-repo-cleanup-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: content-repo-cleanup-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${BucketName}"
+                  - !Sub "arn:aws:s3:::${BucketName}/*"
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: content-repo-cleanup
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CleanupLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          s3 = boto3.client("s3")
+          BUCKET = os.environ["BUCKET_NAME"]
+
+          def handler(event, context):
+              # Discover all generations by listing top-level prefixes.
+              resp = s3.list_objects_v2(Bucket=BUCKET, Delimiter="/")
+              generations = [p["Prefix"].rstrip("/") for p in resp.get("CommonPrefixes", [])]
+
+              for gen in generations:
+                  process_generation(gen)
+
+          def process_generation(gen):
+              schedule_key = f"{gen}/delete-schedule.json"
+
+              try:
+                  obj = s3.get_object(Bucket=BUCKET, Key=schedule_key)
+                  schedule = json.loads(obj["Body"].read().decode("utf-8"))
+              except s3.exceptions.NoSuchKey:
+                  return
+              except Exception as e:
+                  print(f"[{gen}] Could not read schedule: {e}")
+                  return
+
+              # Load both manifests to check for live references.
+              live_build_ids = set()
+              for env_suffix in ["staging/manifest.json", "production/manifest.json"]:
+                  try:
+                      obj = s3.get_object(Bucket=BUCKET, Key=f"{gen}/{env_suffix}")
+                      manifest = json.loads(obj["Body"].read().decode("utf-8"))
+                      for pkg in manifest.get("contentPackages", []):
+                          for plat in pkg.get("platforms", []):
+                              bid = plat.get("buildId", "")
+                              if bid:
+                                  live_build_ids.add(bid)
+                  except Exception:
+                      pass  # Missing manifest is fine — skip it.
+
+              now = datetime.now(timezone.utc)
+              surviving = []
+
+              for entry in schedule.get("entries", []):
+                  build_id = entry.get("buildId", "")
+                  delete_after_str = entry.get("deleteAfter", "")
+
+                  if not build_id or not delete_after_str:
+                      continue
+
+                  try:
+                      delete_after = datetime.fromisoformat(delete_after_str.replace("Z", "+00:00"))
+                  except ValueError:
+                      surviving.append(entry)
+                      continue
+
+                  if now < delete_after:
+                      surviving.append(entry)
+                      continue
+
+                  if build_id in live_build_ids:
+                      print(f"[{gen}] Skipping {build_id} — still referenced by a manifest.")
+                      surviving.append(entry)
+                      continue
+
+                  # Delete the build prefix.
+                  platform = entry.get("platform", "")
+                  pkg = entry.get("contentPackage", "")
+                  prefix = f"{gen}/builds/{build_id}/{platform}/{pkg}/"
+                  deleted = delete_prefix(prefix)
+                  print(f"[{gen}] Deleted {deleted} object(s) from {prefix}")
+
+              # Write back the surviving entries.
+              schedule["entries"] = surviving
+              s3.put_object(
+                  Bucket=BUCKET,
+                  Key=schedule_key,
+                  Body=json.dumps(schedule, indent=2).encode("utf-8"),
+                  ContentType="application/json",
+              )
+
+          def delete_prefix(prefix):
+              paginator = s3.get_paginator("list_objects_v2")
+              deleted = 0
+              for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+                  objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                  if objects:
+                      s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objects})
+                      deleted += len(objects)
+              return deleted
+
+  CleanupSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: content-repo-cleanup-daily
+      Description: Triggers the Content Repo cleanup Lambda once per day.
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Id: CleanupLambdaTarget
+          Arn: !GetAtt CleanupLambda.Arn
+
+  CleanupSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CleanupLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CleanupSchedule.Arn
+
+Outputs:
+  LambdaArn:
+    Value: !GetAtt CleanupLambda.Arn
+    Description: ARN of the cleanup Lambda function.
+  ScheduleArn:
+    Value: !GetAtt CleanupSchedule.Arn
+    Description: ARN of the daily EventBridge rule.

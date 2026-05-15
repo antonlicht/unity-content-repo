@@ -1,34 +1,108 @@
 <ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:editor="UnityEditor.UIElements">
     <ui:VisualElement name="root" class="cs-root">
 
-        <ui:VisualElement name="top-bar" class="cs-top-bar">
-            <ui:Label name="title-label" text="Content Browser" class="cs-title" />
-            <ui:VisualElement class="cs-flex-spacer" />
-            <ui:Button name="btn-new-folder" class="cs-icon-btn cs-icon-btn--lg" tooltip="New folder">
-                <ui:Image name="img-new-folder" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
-            <ui:Button name="btn-refresh" class="cs-icon-btn cs-icon-btn--lg" tooltip="Refresh folder list">
-                <ui:Image name="img-refresh" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
-            <ui:Button name="btn-pull-all" class="cs-icon-btn cs-icon-btn--lg" tooltip="Pull all checked-out folders">
-                <ui:Image name="img-pull-all" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
+        <ui:VisualElement name="tab-bar" class="cs-tab-bar">
+            <ui:Button name="tab-folders" text="Repository" class="cs-tab cs-tab--active" />
+            <ui:Button name="tab-build"   text="Build"   class="cs-tab" />
+            <ui:Button name="tab-upload"  text="Upload"  class="cs-tab" />
         </ui:VisualElement>
 
-        <ui:VisualElement name="new-folder-row" class="cs-new-folder-row">
-            <ui:TextField name="new-folder-field" class="cs-commit-field"
-                          tooltip="Enter a folder name, then click Create" />
-            <ui:Button name="btn-create-folder" text="Create" />
+        <!-- ── Folders tab ───────────────────────────────────────────────── -->
+        <ui:VisualElement name="panel-folders" class="cs-panel">
+
+            <ui:VisualElement name="top-bar" class="cs-top-bar">
+                <ui:Label name="title-label" text="Content Browser" class="cs-title" />
+                <ui:VisualElement class="cs-flex-spacer" />
+                <ui:Button name="btn-new-folder" class="cs-icon-btn cs-icon-btn--lg" tooltip="New folder">
+                    <ui:Image name="img-new-folder" class="cs-icon-image" picking-mode="Ignore" />
+                </ui:Button>
+                <ui:Button name="btn-refresh" class="cs-icon-btn cs-icon-btn--lg" tooltip="Refresh folder list">
+                    <ui:Image name="img-refresh" class="cs-icon-image" picking-mode="Ignore" />
+                </ui:Button>
+                <ui:Button name="btn-pull-all" class="cs-icon-btn cs-icon-btn--lg" tooltip="Pull all checked-out folders">
+                    <ui:Image name="img-pull-all" class="cs-icon-image" picking-mode="Ignore" />
+                </ui:Button>
+            </ui:VisualElement>
+
+            <ui:VisualElement name="new-folder-row" class="cs-new-folder-row">
+                <ui:TextField name="new-folder-field" class="cs-commit-field" tooltip="Enter a folder name, then click Create" />
+                <ui:Button name="btn-create-folder" text="Create" />
+            </ui:VisualElement>
+
+            <ui:VisualElement name="setup-banner" class="cs-setup-banner">
+                <ui:Label text="The content repository has not been initialized yet. Configure its remote URL and local path under Project Settings > Content Repo, then click Initialize." class="cs-setup-label" />
+                <ui:Button name="btn-init" text="Initialize" class="cs-primary" />
+            </ui:VisualElement>
+
+            <ui:ScrollView name="folder-list-container" class="cs-folder-list" />
+
         </ui:VisualElement>
 
-        <ui:VisualElement name="setup-banner" class="cs-setup-banner">
-            <ui:Label
-                text="The content repository has not been initialized yet. Configure its remote URL and local path under Project Settings &gt; Content Repo, then click Initialize."
-                class="cs-setup-label" />
-            <ui:Button name="btn-init" text="Initialize" class="cs-primary" />
+        <!-- ── Build tab ─────────────────────────────────────────────────── -->
+        <ui:VisualElement name="panel-build" class="cs-panel" style="display:none;">
+
+            <ui:VisualElement name="gen-warning-banner" class="cs-gen-warning" style="display:none;">
+                <ui:Label name="gen-warning-label" class="cs-setup-label" />
+                <ui:VisualElement class="cs-row-actions">
+                    <ui:Button name="btn-bump-generation" text="Bump generation" class="cs-text-btn cs-primary-btn" />
+                    <ui:Button name="btn-ack-unity-version" text="Acknowledge (patch only)" class="cs-text-btn" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+
+            <ui:VisualElement class="cs-top-bar">
+                <ui:Label text="Build" class="cs-title" />
+                <ui:Label name="build-generation-label" class="cs-inline-label" />
+                <ui:VisualElement class="cs-flex-spacer" />
+                <ui:Button name="btn-build-all" text="Build all" class="cs-text-btn" />
+            </ui:VisualElement>
+
+            <ui:ScrollView name="build-list-container" class="cs-folder-list" />
+            <ui:Label name="build-empty" text="No content packages are checked out." class="cs-empty-label" style="display:none;" />
+
+            <ui:Label text="Log" class="cs-section-label" />
+            <ui:ScrollView name="build-log-container" class="cs-log">
+                <ui:Label name="build-log" class="cs-log-text" />
+            </ui:ScrollView>
+
         </ui:VisualElement>
 
-        <ui:ScrollView name="folder-list-container" class="cs-folder-list" />
+        <!-- ── Upload tab ─────────────────────────────────────────────────── -->
+        <ui:VisualElement name="panel-upload" class="cs-panel" style="display:none;">
+
+            <ui:VisualElement class="cs-top-bar">
+                <ui:Label text="Upload" class="cs-title" />
+                <ui:VisualElement class="cs-flex-spacer" />
+                <ui:Label text="Environment:" class="cs-inline-label" />
+                <ui:EnumField name="env-upload" class="cs-enum" />
+                <ui:Button name="btn-validate-credentials" text="Validate" class="cs-text-btn" />
+            </ui:VisualElement>
+
+            <ui:Label name="validate-result" text="" class="cs-inline-result" />
+
+            <ui:VisualElement class="cs-top-bar">
+                <ui:VisualElement class="cs-flex-spacer" />
+                <ui:Button name="btn-upload-all"           text="Upload all"         class="cs-text-btn" />
+                <ui:Button name="btn-publish-manifest"     text="Publish manifest"   class="cs-text-btn" />
+                <ui:Button name="btn-promote-all"          text="Promote all → prod" class="cs-text-btn" />
+                <ui:Button name="btn-build-and-upload-all" text="Build + Upload all" class="cs-text-btn cs-primary-btn" />
+            </ui:VisualElement>
+
+            <ui:ScrollView name="upload-list-container" class="cs-folder-list" />
+            <ui:Label name="upload-empty" text="No content packages are checked out." class="cs-empty-label" style="display:none;" />
+
+            <ui:Label text="Infrastructure" class="cs-section-label" />
+            <ui:VisualElement class="cs-top-bar" style="padding-top:2px;padding-bottom:4px;">
+                <ui:Label name="stack-status-label" text="" class="cs-inline-label" style="flex-grow:1;" />
+                <ui:Button name="btn-deploy-lambda"    text="Deploy cleanup Lambda"  class="cs-text-btn" />
+                <ui:Button name="btn-teardown-lambda"  text="Teardown"               class="cs-text-btn cs-danger" />
+            </ui:VisualElement>
+
+            <ui:Label text="Log" class="cs-section-label" />
+            <ui:ScrollView name="upload-log-container" class="cs-log">
+                <ui:Label name="upload-log" class="cs-log-text" />
+            </ui:ScrollView>
+
+        </ui:VisualElement>
 
         <ui:VisualElement name="status-bar" class="cs-status-bar">
             <ui:VisualElement name="progress-spinner" class="cs-spinner" />
