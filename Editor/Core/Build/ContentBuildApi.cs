@@ -78,16 +78,6 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException(
                     "Addressables is not initialized. Open Window > Asset Management > Addressables > Groups.");
 
-            var groups = settings.groups
-                .Where(g => g != null && g.Name != null &&
-                            g.Name.StartsWith(contentPackageName + "_", StringComparison.Ordinal))
-                .ToList();
-
-            if (groups.Count == 0)
-                throw new InvalidOperationException(
-                    $"No Addressables groups found with prefix '{contentPackageName}_'. " +
-                    $"Group names must follow the convention '<ContentPackageName>_*'.");
-
             var profileId = settings.profileSettings.GetProfileId(buildSettings.AddressablesProfileName);
             if (string.IsNullOrEmpty(profileId))
                 throw new InvalidOperationException(
@@ -95,9 +85,20 @@ namespace ContentRepo.Editor
                     $"Configure it under Project Settings > Content Repo > Build.");
 
             var previousActiveProfile = settings.activeProfileId;
-            var previousLoadPath = settings.profileSettings.GetValueByName(profileId, buildSettings.RemoteLoadPathVariableName);
             var previousPlayerVersion = settings.OverridePlayerVersion;
+
+            // CreateValue is required before SetValue — ensure both profile variables exist.
+            // Use activeProfileId here because we haven't switched to profileId yet.
+            settings.activeProfileId = profileId;
+            EnsureProfileVariable(settings, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder, log);
+            EnsureProfileVariable(settings, buildSettings.RemoteBuildPathVariableName, "ServerData/[BuildTarget]", log);
+
+            var previousLoadPath = settings.profileSettings.GetValueByName(profileId, buildSettings.RemoteLoadPathVariableName);
+
+            // Disable all existing groups for the duration of this build — content packages
+            // must never bleed into client builds and vice versa.
             var disabledStates = new Dictionary<AddressableAssetGroup, bool>();
+            AddressableAssetGroup tempGroup = null;
 
             ContentBuildResult result = null;
             try
@@ -108,20 +109,29 @@ namespace ContentRepo.Editor
                     var schema = g.GetSchema<BundledAssetGroupSchema>();
                     if (schema == null) continue;
                     disabledStates[g] = schema.IncludeInBuild;
-                    schema.IncludeInBuild = groups.Contains(g);
+                    schema.IncludeInBuild = false;
+                }
+
+                tempGroup = CreateTemporaryGroup(settings, contentPackageName, profileId, buildSettings, log);
+
+                // Wipe the Addressables build output so stale bundles from previous runs
+                // don't mix in, keeping the buildId deterministic across identical builds.
+                var buildOutputPath = ResolveBuildOutputPath(settings, profileId, buildSettings.RemoteBuildPathVariableName);
+                if (Directory.Exists(buildOutputPath))
+                {
+                    Directory.Delete(buildOutputPath, true);
+                    log?.Invoke($"[Build] Cleared previous build output at {buildOutputPath}");
                 }
 
                 settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder);
-                settings.activeProfileId = profileId;
                 settings.OverridePlayerVersion = contentPackageName;
 
-                log?.Invoke($"[Build] Load path set to placeholder. Building {groups.Count} group(s)…");
+                log?.Invoke("[Build] Load path set to placeholder. Building…");
 
                 AddressableAssetSettings.BuildPlayerContent(out var buildResult);
                 if (!string.IsNullOrEmpty(buildResult.Error))
                     throw new InvalidOperationException($"Addressables build failed: {buildResult.Error}");
 
-                var buildOutputPath = ResolveBuildOutputPath(settings, profileId, buildSettings.RemoteBuildPathVariableName);
                 log?.Invoke($"[Build] Collecting artifacts from {buildOutputPath}");
 
                 var bundleFiles = Directory.GetFiles(buildOutputPath, "*.bundle", SearchOption.AllDirectories);
@@ -172,6 +182,11 @@ namespace ContentRepo.Editor
             }
             finally
             {
+                // Deactivate rather than delete — preserving the group GUID keeps bundle
+                // hashes deterministic across builds of the same content.
+                DeactivateTemporaryGroup(settings, tempGroup, log);
+
+                // Restore all previously-disabled groups.
                 foreach (var kv in disabledStates)
                 {
                     var schema = kv.Key.GetSchema<BundledAssetGroupSchema>();
@@ -180,6 +195,8 @@ namespace ContentRepo.Editor
                 settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, previousLoadPath);
                 settings.activeProfileId = previousActiveProfile;
                 settings.OverridePlayerVersion = previousPlayerVersion;
+
+                AssetDatabase.SaveAssets();
 
                 try { OnBuildComplete?.Invoke(result); }
                 catch (Exception ex) { Debug.LogException(ex); }
@@ -279,6 +296,111 @@ namespace ContentRepo.Editor
         private static string BuildTimestampKey(string contentPackageName, string platform) =>
             $"ContentRepo.LastBuild.{Application.dataPath.GetHashCode():X}.{platform}.{contentPackageName}";
 
+        private static void EnsureProfileVariable(AddressableAssetSettings settings,
+            string variableName, string defaultValue, BuildLogHandler log)
+        {
+            // GetValueByName returns null or empty when the variable does not exist.
+            var existing = settings.profileSettings.GetValueByName(settings.activeProfileId, variableName);
+            if (!string.IsNullOrEmpty(existing)) return;
+
+            // CreateValue adds the variable to every profile with the supplied default.
+            settings.profileSettings.CreateValue(variableName, defaultValue);
+            log?.Invoke($"[Build] Created missing profile variable '{variableName}' (default: '{defaultValue}')");
+        }
+
+        // ── Temporary group management ────────────────────────────────────────
+
+        private static readonly string TempGroupPrefix = "__ContentRepo_Temp_";
+
+        private static AddressableAssetGroup CreateTemporaryGroup(
+            AddressableAssetSettings settings,
+            string contentPackageName,
+            string profileId,
+            ContentBuildSettings buildSettings,
+            BuildLogHandler log)
+        {
+            // Resolve the Unity-relative asset path for the content package folder.
+            var repoLocalPath = ContentRepoSettings.instance.LocalPath.Replace('\\', '/').TrimEnd('/');
+            var contentAssetPath = $"{repoLocalPath}/{contentPackageName}";
+
+            if (!contentAssetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Content repo local path '{repoLocalPath}' must be inside the Assets/ folder for Addressables to reference its assets.");
+
+            if (!AssetDatabase.IsValidFolder(contentAssetPath))
+                throw new InvalidOperationException(
+                    $"Content package folder '{contentAssetPath}' not found in the Asset Database. " +
+                    $"Make sure '{contentPackageName}' is checked out.");
+
+            var guids = AssetDatabase.FindAssets("", new[] { contentAssetPath })
+                .Where(g => !AssetDatabase.IsValidFolder(AssetDatabase.GUIDToAssetPath(g)))
+                .ToArray();
+
+            if (guids.Length == 0)
+                throw new InvalidOperationException(
+                    $"No assets found under '{contentAssetPath}'. Check the folder contains importable assets.");
+
+            // Remove any leftover temp group from a previous failed build.
+            var groupName = $"{TempGroupPrefix}{contentPackageName}";
+
+            // Reuse an existing temp group to keep its GUID stable — bundle hashes are
+            // derived from the GUID, so recreating gives a different hash for identical content.
+            var group = settings.FindGroup(groupName);
+            if (group == null)
+            {
+                group = settings.CreateGroup(
+                    groupName,
+                    setAsDefaultGroup: false,
+                    readOnly: false,
+                    postEvent: false,
+                    schemasToCopy: null,
+                    typeof(BundledAssetGroupSchema));
+
+                var schema = group.GetSchema<BundledAssetGroupSchema>();
+                EnsureProfileVariable(settings, buildSettings.RemoteBuildPathVariableName, "ServerData/[BuildTarget]", log);
+                EnsureProfileVariable(settings, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder, log);
+                schema.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
+                schema.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
+                schema.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
+                log?.Invoke($"[Build] Created temp group '{groupName}'");
+            }
+            else
+            {
+                // Clear previous entries so we get a fresh, accurate set for this build.
+                var oldEntries = new List<AddressableAssetEntry>(group.entries);
+                foreach (var e in oldEntries)
+                    group.RemoveAssetEntry(e, postEvent: false);
+                log?.Invoke($"[Build] Reusing temp group '{groupName}' (stable GUID)");
+            }
+
+            var schemaRef = group.GetSchema<BundledAssetGroupSchema>();
+            schemaRef.IncludeInBuild = true;
+
+            foreach (var guid in guids)
+                settings.CreateOrMoveEntry(guid, group, readOnly: false, postEvent: false);
+
+            AssetDatabase.SaveAssets();
+            log?.Invoke($"[Build] Populated '{groupName}' with {guids.Length} asset(s) from {contentAssetPath}");
+            return group;
+        }
+
+        private static void DeactivateTemporaryGroup(AddressableAssetSettings settings,
+            AddressableAssetGroup group, BuildLogHandler log)
+        {
+            if (group == null) return;
+            try
+            {
+                var schema = group.GetSchema<BundledAssetGroupSchema>();
+                if (schema != null) schema.IncludeInBuild = false;
+                AssetDatabase.SaveAssets();
+                log?.Invoke($"[Build] Deactivated temp group '{group.Name}' (IncludeInBuild = false)");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ContentRepo] Failed to deactivate temp Addressables group: {ex.Message}");
+            }
+        }
+
         internal static string ComputeBuildId(string[] bundleFiles)
         {
             var names = bundleFiles
@@ -317,6 +439,7 @@ namespace ContentRepo.Editor
 
         private static void CopyDirectory(string source, string dest)
         {
+            Directory.CreateDirectory(dest);
             foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
                 Directory.CreateDirectory(dir.Replace(source, dest));
             foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
