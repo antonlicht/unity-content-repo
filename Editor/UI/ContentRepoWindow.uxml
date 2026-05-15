@@ -51,9 +51,11 @@
 
             <ui:VisualElement class="cs-top-bar">
                 <ui:Label text="Build" class="cs-title" />
-                <ui:Label name="build-generation-label" class="cs-inline-label" />
                 <ui:VisualElement class="cs-flex-spacer" />
-                <ui:Button name="btn-build-all" text="Build all" class="cs-text-btn" />
+                <ui:Button name="btn-build-all" class="cs-icon-btn cs-icon-btn--lg"
+                           tooltip="Build all checked-out content packages for current platform">
+                    <ui:Image name="img-build-all" class="cs-icon-image" picking-mode="Ignore" />
+                </ui:Button>
             </ui:VisualElement>
 
             <ui:ScrollView name="build-list-container" class="cs-folder-list" />

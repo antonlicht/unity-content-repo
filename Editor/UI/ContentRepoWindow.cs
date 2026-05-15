@@ -28,7 +28,7 @@ namespace ContentRepo.Editor
 
         // Build tab
         private VisualElement genWarningBanner;
-        private Label genWarningLabel, buildGenerationLabel, buildEmpty, buildLog;
+        private Label genWarningLabel, buildEmpty, buildLog;
         private Button bumpGenerationBtn, ackUnityVersionBtn, buildAllBtn;
         private ScrollView buildList;
 
@@ -107,10 +107,10 @@ namespace ContentRepo.Editor
             newFolderField = Q<TextField>("new-folder-field"); folderList = Q<ScrollView>("folder-list-container");
 
             genWarningBanner = Q<VisualElement>("gen-warning-banner"); genWarningLabel = Q<Label>("gen-warning-label");
-            buildGenerationLabel = Q<Label>("build-generation-label");
             bumpGenerationBtn = Q<Button>("btn-bump-generation"); ackUnityVersionBtn = Q<Button>("btn-ack-unity-version");
             buildAllBtn = Q<Button>("btn-build-all"); buildList = Q<ScrollView>("build-list-container");
             buildEmpty = Q<Label>("build-empty"); buildLog = Q<Label>("build-log");
+            Q<Image>("img-build-all").image = LoadIcon("hammer");
 
             envUploadField = Q<EnumField>("env-upload");
             validateBtn = Q<Button>("btn-validate-credentials"); validateResult = Q<Label>("validate-result");
@@ -210,8 +210,6 @@ namespace ContentRepo.Editor
         private void RefreshGenerationWarning()
         {
             var gen = ContentRepoGenerationSettings.instance;
-            buildGenerationLabel.text = $"gen: {gen.Generation}  |  unity: {Application.unityVersion}";
-
             var change = gen.CheckUnityVersionChange();
             if (change == ContentRepoGenerationSettings.VersionChangeKind.MinorOrMajor)
             {
