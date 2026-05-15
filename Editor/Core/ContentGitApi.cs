@@ -12,12 +12,21 @@ using Debug = UnityEngine.Debug;
 
 namespace ContentRepo.Editor
 {
+    public enum ChangeKind { Added, Modified, Deleted }
+
+    public struct FileChange
+    {
+        public string Path;   // relative to repo root, e.g. "FolderA/sub/file.txt"
+        public ChangeKind Kind;
+    }
+
     public struct FolderStatus
     {
         public int Staged;     // changes in the index (git add)
         public int Modified;   // worktree modifications not yet staged
         public int Deleted;    // worktree deletions not yet staged
         public int Untracked;  // files unknown to git
+        public List<FileChange> Files;
 
         public bool IsClean => Staged == 0 && Modified == 0 && Deleted == 0 && Untracked == 0;
 
@@ -208,7 +217,7 @@ namespace ContentRepo.Editor
                 var output = await RunGitCommandAsync("sparse-checkout list", ContentAbsolutePath);
                 return output
                     .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(s => s.Trim().TrimStart('/'))
+                    .Select(s => s.Trim().Trim('/'))
                     .Where(s => !string.IsNullOrEmpty(s))
                     .ToList();
             }
@@ -219,7 +228,7 @@ namespace ContentRepo.Editor
         }
 
         /// <summary>
-        /// Runs a single <c>git status --porcelain</c> over the submodule and returns
+        /// Runs a single <c>git status -sbu</c> over the submodule and returns
         /// the breakdown keyed by top-level folder name.  Non-throwing; returns empty on error.
         /// </summary>
         public static async Task<Dictionary<string, FolderStatus>> GetAllFolderStatusesAsync()
@@ -227,8 +236,8 @@ namespace ContentRepo.Editor
             var result = new Dictionary<string, FolderStatus>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                // -sb gives branch ahead/behind on the ## line plus short-format file entries
-                var output = await RunGitCommandAsync("status -sb", ContentAbsolutePath);
+                // -sbu: short format + branch ahead/behind + always show untracked files
+                var output = await RunGitCommandAsync("status -sbu", ContentAbsolutePath, silent: true);
                 RepositoryAhead = 0;
                 RepositoryBehind = 0;
 
@@ -245,25 +254,34 @@ namespace ContentRepo.Editor
 
                     var x = line[0];
                     var y = line[1];
-                    var path = line.Substring(3);
+                    var path = StripGitQuotes(line.Substring(3));
 
                     var arrowIdx = path.IndexOf(" -> ", StringComparison.Ordinal);
-                    if (arrowIdx >= 0) path = path.Substring(arrowIdx + 4);
+                    if (arrowIdx >= 0) path = StripGitQuotes(path.Substring(arrowIdx + 4));
 
                     var slash = path.IndexOf('/');
                     var topLevel = slash > 0 ? path.Substring(0, slash).Trim() : string.Empty;
                     if (string.IsNullOrEmpty(topLevel)) continue;
 
                     result.TryGetValue(topLevel, out var s);
+                    if (s.Files == null) s.Files = new List<FileChange>();
 
-                    if (x == '?' && y == '?') s.Untracked++;
+                    ChangeKind kind;
+                    if (x == '?' && y == '?')
+                    {
+                        s.Untracked++;
+                        kind = ChangeKind.Added;
+                    }
                     else
                     {
                         if (x != ' ') s.Staged++;
                         if (y == 'M') s.Modified++;
                         if (y == 'D') s.Deleted++;
+                        if (x == 'D' || y == 'D') kind = ChangeKind.Deleted;
+                        else if (x == 'A') kind = ChangeKind.Added;
+                        else kind = ChangeKind.Modified;
                     }
-
+                    s.Files.Add(new FileChange { Path = path, Kind = kind });
                     result[topLevel] = s;
                 }
             }
@@ -275,6 +293,9 @@ namespace ContentRepo.Editor
             }
             return result;
         }
+
+        private static string StripGitQuotes(string s) =>
+            s.Length >= 2 && s[0] == '"' && s[s.Length - 1] == '"' ? s.Substring(1, s.Length - 2) : s;
 
         private static int ParseCount(string s, string keyword)
         {
@@ -461,6 +482,47 @@ namespace ContentRepo.Editor
             NotifyChange();
         }
 
+        /// <summary>
+        /// Discards local changes for tracked files (restores to HEAD) and deletes untracked Added files.
+        /// Also removes corresponding .meta files for untracked entries.
+        /// </summary>
+        public static async Task DiscardFilesAsync(IEnumerable<string> repoPaths, IEnumerable<ChangeKind> kinds)
+        {
+            var pairs = repoPaths.Zip(kinds, (p, k) => (p, k)).ToList();
+            var toRestore = pairs.Where(x => x.k != ChangeKind.Added).Select(x => x.p).ToList();
+            var toDelete  = pairs.Where(x => x.k == ChangeKind.Added).Select(x => x.p).ToList();
+
+            if (toRestore.Count > 0)
+            {
+                var args = string.Join(" ", toRestore.Select(Quote));
+                try { await RunGitCommandAsync($"restore --source=HEAD --staged --worktree -- {args}", ContentAbsolutePath); }
+                catch { await RunGitCommandAsync($"checkout HEAD -- {args}", ContentAbsolutePath); }
+            }
+
+            if (toDelete.Count > 0)
+                await DeleteLocalFilesAsync(toDelete);
+
+            NotifyChange();
+            AssetDatabase.Refresh();
+        }
+
+        /// <summary>Deletes untracked local files (and their .meta counterparts) from disk.</summary>
+        public static async Task DeleteLocalFilesAsync(IEnumerable<string> repoPaths)
+        {
+            await Task.Run(() =>
+            {
+                foreach (var rel in repoPaths)
+                {
+                    var full = Path.Combine(ContentAbsolutePath, rel.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(full)) File.Delete(full);
+                    var meta = full + ".meta";
+                    if (File.Exists(meta)) File.Delete(meta);
+                }
+            });
+            NotifyChange();
+            AssetDatabase.Refresh();
+        }
+
         public static async Task DeleteRemoteFolderAsync(string folder)
         {
             ValidateFolderName(folder);
@@ -523,7 +585,7 @@ namespace ContentRepo.Editor
             return string.Join(", ", parts);
         }
 
-        public static Task<string> RunGitCommandAsync(string args, string workingDir = null)
+        public static Task<string> RunGitCommandAsync(string args, string workingDir = null, bool silent = true)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -537,6 +599,9 @@ namespace ContentRepo.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+
+            if (!silent)
+                UnityEngine.Debug.Log($"[ContentRepo] > git {args}  (in {startInfo.WorkingDirectory})");
 
             return Task.Run(() =>
             {

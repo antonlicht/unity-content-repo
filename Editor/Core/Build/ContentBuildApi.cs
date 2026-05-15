@@ -1,0 +1,360 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
+using UnityEditor;
+using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Settings;
+using UnityEditor.AddressableAssets.Settings.GroupSchemas;
+using UnityEngine;
+
+namespace ContentRepo.Editor
+{
+    public delegate void BuildLogHandler(string line);
+
+    public sealed class ContentBuildResult
+    {
+        public string ContentPackageName;
+        public string Platform;
+        public string Generation;
+        public string BuildId;
+        public string ArtifactPath;
+        public bool Success;
+        public string ErrorMessage;
+        public string GitSha;
+    }
+
+    // Written alongside every build so cross-session upload can locate artifacts.
+    [Serializable]
+    internal sealed class BuildMetadata
+    {
+        public string contentPackage;
+        public string platform;
+        public string generation;
+        public string buildId;
+        public string gitSha;
+        public string unityVersion;
+        public string builtAt;
+
+        public string ToJson() => JsonUtility.ToJson(this, true);
+
+        public static BuildMetadata FromJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try { return JsonUtility.FromJson<BuildMetadata>(json); }
+            catch { return null; }
+        }
+    }
+
+    public static class ContentBuildApi
+    {
+        // Placeholder baked into catalog at build time; replaced with real CDN URL on upload.
+        public const string LoadPathPlaceholder = "https://content-repo-cdn-placeholder.example/";
+
+        public static event Action<ContentBuildResult> OnBuildComplete;
+
+        // In-memory cache of most recent build per package (keyed by contentPackageName).
+        private static readonly Dictionary<string, ContentBuildResult> LastResults = new(StringComparer.Ordinal);
+
+        public static ContentBuildResult GetLastBuildResult(string contentPackageName) =>
+            LastResults.TryGetValue(contentPackageName, out var r) ? r : null;
+
+        public static async Task<ContentBuildResult> BuildContentPackageAsync(
+            string contentPackageName, BuildLogHandler log = null)
+        {
+            ValidatePackageName(contentPackageName);
+
+            var genSettings = ContentRepoGenerationSettings.instance;
+            var buildSettings = ContentBuildSettings.instance;
+            var generation = genSettings.Generation;
+
+            log?.Invoke($"[Build] '{contentPackageName}'  generation={generation}  unity={Application.unityVersion}");
+
+            var settings = AddressableAssetSettingsDefaultObject.Settings;
+            if (settings == null)
+                throw new InvalidOperationException(
+                    "Addressables is not initialized. Open Window > Asset Management > Addressables > Groups.");
+
+            var groups = settings.groups
+                .Where(g => g != null && g.Name != null &&
+                            g.Name.StartsWith(contentPackageName + "_", StringComparison.Ordinal))
+                .ToList();
+
+            if (groups.Count == 0)
+                throw new InvalidOperationException(
+                    $"No Addressables groups found with prefix '{contentPackageName}_'. " +
+                    $"Group names must follow the convention '<ContentPackageName>_*'.");
+
+            var profileId = settings.profileSettings.GetProfileId(buildSettings.AddressablesProfileName);
+            if (string.IsNullOrEmpty(profileId))
+                throw new InvalidOperationException(
+                    $"Addressables profile '{buildSettings.AddressablesProfileName}' not found. " +
+                    $"Configure it under Project Settings > Content Repo > Build.");
+
+            var previousActiveProfile = settings.activeProfileId;
+            var previousLoadPath = settings.profileSettings.GetValueByName(profileId, buildSettings.RemoteLoadPathVariableName);
+            var previousPlayerVersion = settings.OverridePlayerVersion;
+            var disabledStates = new Dictionary<AddressableAssetGroup, bool>();
+
+            ContentBuildResult result = null;
+            try
+            {
+                foreach (var g in settings.groups)
+                {
+                    if (g == null) continue;
+                    var schema = g.GetSchema<BundledAssetGroupSchema>();
+                    if (schema == null) continue;
+                    disabledStates[g] = schema.IncludeInBuild;
+                    schema.IncludeInBuild = groups.Contains(g);
+                }
+
+                settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder);
+                settings.activeProfileId = profileId;
+                settings.OverridePlayerVersion = contentPackageName;
+
+                log?.Invoke($"[Build] Load path set to placeholder. Building {groups.Count} group(s)…");
+
+                AddressableAssetSettings.BuildPlayerContent(out var buildResult);
+                if (!string.IsNullOrEmpty(buildResult.Error))
+                    throw new InvalidOperationException($"Addressables build failed: {buildResult.Error}");
+
+                var buildOutputPath = ResolveBuildOutputPath(settings, profileId, buildSettings.RemoteBuildPathVariableName);
+                log?.Invoke($"[Build] Collecting artifacts from {buildOutputPath}");
+
+                var bundleFiles = Directory.GetFiles(buildOutputPath, "*.bundle", SearchOption.AllDirectories);
+                if (bundleFiles.Length == 0)
+                    throw new InvalidOperationException(
+                        $"No .bundle files found in '{buildOutputPath}'. Check the Addressables build output path.");
+
+                var buildId = ComputeBuildId(bundleFiles);
+                var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
+                var gitSha = await TryGetGitShaAsync();
+
+                var artifactPath = GetArtifactPath(contentPackageName, buildId, platform);
+                await Task.Run(() =>
+                {
+                    if (Directory.Exists(artifactPath)) Directory.Delete(artifactPath, true);
+                    CopyDirectory(buildOutputPath, artifactPath);
+                    WriteMetadata(artifactPath, contentPackageName, platform, generation, buildId, gitSha);
+                });
+
+                RecordBuildTimestamp(contentPackageName, platform);
+                log?.Invoke($"[Build] Done. buildId={buildId}  artifacts={artifactPath}");
+
+                result = new ContentBuildResult
+                {
+                    ContentPackageName = contentPackageName,
+                    Platform = platform,
+                    Generation = generation,
+                    BuildId = buildId,
+                    ArtifactPath = artifactPath,
+                    Success = true,
+                    GitSha = gitSha,
+                };
+                LastResults[contentPackageName] = result;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                result = new ContentBuildResult
+                {
+                    ContentPackageName = contentPackageName,
+                    Platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
+                    Generation = generation,
+                    Success = false,
+                    ErrorMessage = ex.Message,
+                };
+                log?.Invoke($"[Build] FAILED: {ex.Message}");
+                throw;
+            }
+            finally
+            {
+                foreach (var kv in disabledStates)
+                {
+                    var schema = kv.Key.GetSchema<BundledAssetGroupSchema>();
+                    if (schema != null) schema.IncludeInBuild = kv.Value;
+                }
+                settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, previousLoadPath);
+                settings.activeProfileId = previousActiveProfile;
+                settings.OverridePlayerVersion = previousPlayerVersion;
+
+                try { OnBuildComplete?.Invoke(result); }
+                catch (Exception ex) { Debug.LogException(ex); }
+            }
+        }
+
+        public static async Task<List<ContentBuildResult>> BuildAllCheckedOutAsync(BuildLogHandler log = null)
+        {
+            var folders = await ContentGitApi.GetCheckedOutFoldersAsync();
+            var results = new List<ContentBuildResult>(folders.Count);
+            foreach (var f in folders)
+            {
+                try { results.Add(await BuildContentPackageAsync(f, log)); }
+                catch (Exception ex)
+                {
+                    Debug.LogException(ex);
+                    results.Add(new ContentBuildResult
+                    {
+                        ContentPackageName = f,
+                        Platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
+                        Generation = ContentRepoGenerationSettings.instance.Generation,
+                        Success = false, ErrorMessage = ex.Message,
+                    });
+                }
+            }
+            return results;
+        }
+
+        public static void BuildContentPackageCLI()
+        {
+            try
+            {
+                var args = ParseCommandLine();
+                if (!args.TryGetValue("contentPackage", out var pkg))
+                    throw new InvalidOperationException("Missing -contentPackage <name>");
+
+                BuildContentPackageAsync(pkg, Debug.Log).GetAwaiter().GetResult();
+                EditorApplication.Exit(0);
+            }
+            catch (Exception ex) { Debug.LogError($"[Build CLI] {ex}"); EditorApplication.Exit(1); }
+        }
+
+        public static void BuildAllCLI()
+        {
+            try
+            {
+                var results = BuildAllCheckedOutAsync(Debug.Log).GetAwaiter().GetResult();
+                EditorApplication.Exit(results.All(r => r.Success) ? 0 : 1);
+            }
+            catch (Exception ex) { Debug.LogError($"[Build CLI] {ex}"); EditorApplication.Exit(1); }
+        }
+
+        // Rewrites placeholder URLs in catalog JSON files and updates companion .hash files.
+        // Operates on files in targetDir (a temp copy, not the original artifact).
+        public static void RewriteCatalogLoadPaths(string targetDir, string finalBaseUrl)
+        {
+            foreach (var jsonFile in Directory.GetFiles(targetDir, "*.json", SearchOption.AllDirectories))
+            {
+                var content = File.ReadAllText(jsonFile);
+                if (!content.Contains(LoadPathPlaceholder)) continue;
+
+                var rewritten = content.Replace(LoadPathPlaceholder, finalBaseUrl.TrimEnd('/') + "/");
+                File.WriteAllText(jsonFile, rewritten);
+
+                var hashFile = Path.ChangeExtension(jsonFile, ".hash");
+                using var md5 = MD5.Create();
+                var hashBytes = md5.ComputeHash(Encoding.UTF8.GetBytes(rewritten));
+                File.WriteAllText(hashFile, BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant());
+            }
+        }
+
+        public static string GetArtifactPath(string contentPackageName, string buildId, string platform)
+        {
+            var root = ContentBuildSettings.instance.BuildOutputRoot;
+            var absRoot = Path.IsPathRooted(root) ? root : Path.Combine(ContentGitApi.ProjectRoot, root);
+            return Path.Combine(absRoot, "builds", buildId, platform, contentPackageName);
+        }
+
+        internal static BuildMetadata ReadMetadata(string artifactPath)
+        {
+            var path = Path.Combine(artifactPath, "build-metadata.json");
+            if (!File.Exists(path)) return null;
+            return BuildMetadata.FromJson(File.ReadAllText(path));
+        }
+
+        public static DateTime? GetLastBuildTimestamp(string contentPackageName, string platform)
+        {
+            var key = BuildTimestampKey(contentPackageName, platform);
+            var ticks = EditorPrefs.GetString(key, null);
+            if (string.IsNullOrEmpty(ticks) || !long.TryParse(ticks, out var t)) return null;
+            return new DateTime(t, DateTimeKind.Utc);
+        }
+
+        private static void RecordBuildTimestamp(string contentPackageName, string platform) =>
+            EditorPrefs.SetString(BuildTimestampKey(contentPackageName, platform), DateTime.UtcNow.Ticks.ToString());
+
+        private static string BuildTimestampKey(string contentPackageName, string platform) =>
+            $"ContentRepo.LastBuild.{Application.dataPath.GetHashCode():X}.{platform}.{contentPackageName}";
+
+        internal static string ComputeBuildId(string[] bundleFiles)
+        {
+            var names = bundleFiles
+                .Select(Path.GetFileName)
+                .OrderBy(n => n, StringComparer.Ordinal);
+            var combined = string.Join("|", names);
+            using var sha = SHA256.Create();
+            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(combined));
+            return BitConverter.ToString(hash).Replace("-", "").Substring(0, 16).ToLowerInvariant();
+        }
+
+        private static string ResolveBuildOutputPath(AddressableAssetSettings settings, string profileId, string varName)
+        {
+            var value = settings.profileSettings.GetValueByName(profileId, varName);
+            if (string.IsNullOrEmpty(value))
+                value = "[UnityEngine.AddressableAssets.Addressables.BuildPath]";
+            var evaluated = settings.profileSettings.EvaluateString(profileId, value);
+            return Path.IsPathRooted(evaluated) ? evaluated : Path.GetFullPath(Path.Combine(ContentGitApi.ProjectRoot, evaluated));
+        }
+
+        private static void WriteMetadata(string artifactPath, string pkg, string platform,
+            string generation, string buildId, string gitSha)
+        {
+            var meta = new BuildMetadata
+            {
+                contentPackage = pkg,
+                platform = platform,
+                generation = generation,
+                buildId = buildId,
+                gitSha = gitSha ?? "",
+                unityVersion = Application.unityVersion,
+                builtAt = DateTime.UtcNow.ToString("O"),
+            };
+            File.WriteAllText(Path.Combine(artifactPath, "build-metadata.json"), meta.ToJson());
+        }
+
+        private static void CopyDirectory(string source, string dest)
+        {
+            foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+                Directory.CreateDirectory(dir.Replace(source, dest));
+            foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+                File.Copy(file, file.Replace(source, dest), true);
+        }
+
+        private static async Task<string> TryGetGitShaAsync()
+        {
+            try
+            {
+                var sha = await ContentGitApi.RunGitCommandAsync("rev-parse --short HEAD", ContentGitApi.ContentAbsolutePath);
+                return sha.Trim();
+            }
+            catch { return null; }
+        }
+
+        private static Dictionary<string, string> ParseCommandLine()
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var args = Environment.GetCommandLineArgs();
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (!args[i].StartsWith("-", StringComparison.Ordinal)) continue;
+                var key = args[i].TrimStart('-');
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal))
+                    result[key] = args[++i];
+                else
+                    result[key] = "";
+            }
+            return result;
+        }
+
+        private static void ValidatePackageName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("Content package name cannot be empty.", nameof(name));
+            if (name.IndexOfAny(new[] { '/', '\\', '\n', '\r', '\0', '"', ' ' }) >= 0)
+                throw new ArgumentException("Invalid content package name.", nameof(name));
+        }
+    }
+}
