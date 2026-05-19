@@ -32,7 +32,7 @@ namespace ContentRepo.Editor
                        $" --template-file \"{templateAbsPath}\"" +
                        $" --stack-name {StackName}" +
                        $" --parameter-overrides BucketName={settings.S3BucketName} Region={settings.S3Region}" +
-                       $" --capabilities CAPABILITY_IAM" +
+                       $" --capabilities CAPABILITY_NAMED_IAM" +
                        $" --region {settings.S3Region}";
 
             log?.Invoke("[Infra] Deploying cleanup Lambda stack…");
@@ -77,6 +77,15 @@ namespace ContentRepo.Editor
             catch (Exception ex) { UnityEngine.Debug.LogError($"[Infra CLI] {ex}"); UnityEditor.EditorApplication.Exit(1); }
         }
 
+        public static async Task ConfigureCredentialsAsync(string accessKeyId, string secretAccessKey, string region)
+        {
+            await RunAwsAsync($"configure set aws_access_key_id {accessKeyId}", null);
+            await RunAwsAsync($"configure set aws_secret_access_key {secretAccessKey}", null,
+                              "configure set aws_secret_access_key ***");
+            await RunAwsAsync($"configure set region {region}", null);
+            await RunAwsAsync("configure set output json", null);
+        }
+
         // ── Internals ─────────────────────────────────────────────────────────────
 
         private static void RequireSettings(ContentUploadSettings s)
@@ -87,7 +96,7 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException("S3 region is not configured.");
         }
 
-        private static Task<string> RunAwsAsync(string args, UploadLogHandler log)
+        private static Task<string> RunAwsAsync(string args, UploadLogHandler log, string displayArgs = null)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -101,7 +110,7 @@ namespace ContentRepo.Editor
                 StandardErrorEncoding = Encoding.UTF8,
             };
 
-            var cmd = $"aws {args}";
+            var cmd = $"aws {displayArgs ?? args}";
             UnityEngine.Debug.Log($"[ContentRepo] > {cmd}");
             log?.Invoke($"> {cmd}");
 

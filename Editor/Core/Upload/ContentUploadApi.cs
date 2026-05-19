@@ -60,6 +60,23 @@ namespace ContentRepo.Editor
                 await provider.UploadFolderAsync(tempDir, remotePrefix, log);
                 await provider.InvalidatePathAsync($"/{remotePrefix}*", log);
 
+                var catalogUrl = provider.GetPublicUrl($"{remotePrefix}catalog_{contentPackageName}.json");
+                var manifestEntry = new ContentManifestEntry
+                {
+                    name = contentPackageName,
+                    gitSha = meta.gitSha ?? "",
+                    platforms = new System.Collections.Generic.List<ContentManifestPlatformEntry>
+                    {
+                        new ContentManifestPlatformEntry
+                        {
+                            platform = platform,
+                            catalogUrl = catalogUrl,
+                            buildId = buildId,
+                        }
+                    }
+                };
+                await ContentManifestApi.UpsertEntryAsync(environment, generation, manifestEntry, provider, log);
+
                 RecordUploadTimestamp(contentPackageName, platform, environment);
                 log?.Invoke($"[Upload] Done. Remote prefix: {remotePrefix}");
 
@@ -117,6 +134,28 @@ namespace ContentRepo.Editor
                 }
             }
             return results;
+        }
+
+        public static async Task RemoveFromManifestAsync(string contentPackageName, string environment, UploadLogHandler log = null)
+        {
+            var generation = ContentRepoGenerationSettings.instance.Generation;
+            var provider   = ContentUploadProviderFactory.Resolve();
+            await ContentManifestApi.RemoveEntryAsync(environment, generation, contentPackageName, provider, log);
+            await provider.InvalidatePathAsync($"/{generation}/{environment}/manifest.json", log);
+        }
+
+        // ── Manifest read ────────────────────────────────────────────────────────
+
+        public static async Task<ContentManifest> GetManifestAsync(string environment)
+        {
+            var generation = ContentRepoGenerationSettings.instance.Generation;
+            var provider = ContentUploadProviderFactory.Resolve();
+            try
+            {
+                var json = await provider.DownloadTextAsync($"{generation}/{environment}/manifest.json");
+                return ContentManifest.FromJson(json);
+            }
+            catch { return null; }
         }
 
         // ── Promote ─────────────────────────────────────────────────────────────
@@ -450,6 +489,7 @@ namespace ContentRepo.Editor
 
         private static void CopyDirectory(string source, string dest)
         {
+            Directory.CreateDirectory(dest);
             foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
                 Directory.CreateDirectory(dir.Replace(source, dest));
             foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))

@@ -17,8 +17,8 @@ namespace ContentRepo.Editor
         private const string FolderRowUxmlPath = PackageRoot + "/Editor/UI/FolderRow.uxml";
 
         // Tabs
-        private Button tabFolders, tabBuild, tabUpload;
-        private VisualElement panelFolders, panelBuild, panelUpload;
+        private Button tabFolders, tabDeploy;
+        private VisualElement panelFolders, panelDeploy;
 
         // Folders tab
         private Button refreshBtn, pullAllBtn, newFolderBtn, initBtn;
@@ -26,18 +26,14 @@ namespace ContentRepo.Editor
         private TextField newFolderField;
         private ScrollView folderList;
 
-        // Build tab
+        // Deploy tab (build + upload merged)
         private VisualElement genWarningBanner;
-        private Label genWarningLabel, buildEmpty, buildLog;
-        private Button bumpGenerationBtn, ackUnityVersionBtn, buildAllBtn;
-        private ScrollView buildList;
-
-        // Upload tab
-        private EnumField envUploadField;
-        private Button validateBtn, uploadAllBtn, publishManifestBtn, promoteAllBtn,
-            buildAndUploadAllBtn, deployLambdaBtn, teardownLambdaBtn;
-        private Label validateResult, uploadEmpty, uploadLog, stackStatusLabel;
-        private ScrollView uploadList;
+        private Label genWarningLabel, deployEmpty, deployLog, stackStatusLabel;
+        private Button bumpGenerationBtn, ackUnityVersionBtn, buildAllBtn, deployRefreshBtn;
+        private Button uploadAllBtn, promoteAllBtn, buildAndUploadAllBtn, deployLambdaBtn, teardownLambdaBtn;
+        private ScrollView deployList;
+        private ContentManifest stagingManifest;
+        private ContentManifest productionManifest;
 
         // Status bar
         private VisualElement spinner;
@@ -54,7 +50,6 @@ namespace ContentRepo.Editor
         private bool busy;
         private bool polling;
         private IVisualElementScheduledItem spinnerTick, statusPoller;
-        private BuildEnvironment uploadEnv = BuildEnvironment.Staging;
 
         [MenuItem("Tools/Content Browser")]
         public static void ShowWindow()
@@ -77,15 +72,14 @@ namespace ContentRepo.Editor
             ResolveElements();
             WireTabBar();
             WireFolderTab();
-            WireBuildTab();
-            WireUploadTab();
+            WireDeployTab();
 
-            envUploadField.Init(uploadEnv);
             ContentGitApi.OnStateChanged += OnExternalStateChanged;
 
             SetSpinnerVisible(false);
             SetStatus("Ready");
             _ = RunAsync("Loading…", () => Task.CompletedTask);
+            _ = RefreshManifestsAsync();
             statusPoller = rootVisualElement.schedule.Execute(() => _ = PollStatusesAsync()).Every(60_000);
         }
 
@@ -98,8 +92,8 @@ namespace ContentRepo.Editor
 
         private void ResolveElements()
         {
-            tabFolders = Q<Button>("tab-folders"); tabBuild = Q<Button>("tab-build"); tabUpload = Q<Button>("tab-upload");
-            panelFolders = Q<VisualElement>("panel-folders"); panelBuild = Q<VisualElement>("panel-build"); panelUpload = Q<VisualElement>("panel-upload");
+            tabFolders = Q<Button>("tab-folders"); tabDeploy = Q<Button>("tab-deploy");
+            panelFolders = Q<VisualElement>("panel-folders"); panelDeploy = Q<VisualElement>("panel-deploy");
 
             refreshBtn = Q<Button>("btn-refresh"); pullAllBtn = Q<Button>("btn-pull-all");
             newFolderBtn = Q<Button>("btn-new-folder"); initBtn = Q<Button>("btn-init");
@@ -108,16 +102,16 @@ namespace ContentRepo.Editor
 
             genWarningBanner = Q<VisualElement>("gen-warning-banner"); genWarningLabel = Q<Label>("gen-warning-label");
             bumpGenerationBtn = Q<Button>("btn-bump-generation"); ackUnityVersionBtn = Q<Button>("btn-ack-unity-version");
-            buildAllBtn = Q<Button>("btn-build-all"); buildList = Q<ScrollView>("build-list-container");
-            buildEmpty = Q<Label>("build-empty"); buildLog = Q<Label>("build-log");
-            Q<Image>("img-build-all").image = LoadIcon("hammer");
+            deployRefreshBtn = Q<Button>("btn-deploy-refresh");
+            buildAllBtn = Q<Button>("btn-build-all");
+            uploadAllBtn = Q<Button>("btn-upload-all");
+            promoteAllBtn = Q<Button>("btn-promote-all"); buildAndUploadAllBtn = Q<Button>("btn-more-all");
 
-            envUploadField = Q<EnumField>("env-upload");
-            validateBtn = Q<Button>("btn-validate-credentials"); validateResult = Q<Label>("validate-result");
-            uploadAllBtn = Q<Button>("btn-upload-all"); publishManifestBtn = Q<Button>("btn-publish-manifest");
-            promoteAllBtn = Q<Button>("btn-promote-all"); buildAndUploadAllBtn = Q<Button>("btn-build-and-upload-all");
-            uploadList = Q<ScrollView>("upload-list-container");
-            uploadEmpty = Q<Label>("upload-empty"); uploadLog = Q<Label>("upload-log");
+            Q<Image>("img-deploy-refresh").image = LoadIcon("refresh-cw");
+            Q<Image>("img-build-all").image      = LoadIcon("hammer");
+            Q<Image>("img-upload-all").image     = LoadIcon("cloud-upload");
+            deployList = Q<ScrollView>("deploy-list-container");
+            deployEmpty = Q<Label>("deploy-empty"); deployLog = Q<Label>("deploy-log");
             stackStatusLabel = Q<Label>("stack-status-label");
             deployLambdaBtn = Q<Button>("btn-deploy-lambda"); teardownLambdaBtn = Q<Button>("btn-teardown-lambda");
             spinner = Q<VisualElement>("progress-spinner"); statusLabel = Q<Label>("status-label");
@@ -137,29 +131,23 @@ namespace ContentRepo.Editor
         private void WireTabBar()
         {
             tabFolders.clicked += () => SelectTab("folders");
-            tabBuild.clicked += () => SelectTab("build");
-            tabUpload.clicked += () => SelectTab("upload");
+            tabDeploy.clicked += () => SelectTab("deploy");
             SelectTab("folders");
         }
 
         private void SelectTab(string name)
         {
             panelFolders.style.display = name == "folders" ? DisplayStyle.Flex : DisplayStyle.None;
-            panelBuild.style.display = name == "build" ? DisplayStyle.Flex : DisplayStyle.None;
-            panelUpload.style.display = name == "upload" ? DisplayStyle.Flex : DisplayStyle.None;
+            panelDeploy.style.display  = name == "deploy"  ? DisplayStyle.Flex : DisplayStyle.None;
 
-            foreach (var t in new[] { tabFolders, tabBuild, tabUpload }) t.RemoveFromClassList("cs-tab--active");
+            foreach (var t in new[] { tabFolders, tabDeploy }) t.RemoveFromClassList("cs-tab--active");
             switch (name)
             {
                 case "folders": tabFolders.AddToClassList("cs-tab--active"); break;
-                case "build":
-                    tabBuild.AddToClassList("cs-tab--active");
+                case "deploy":
+                    tabDeploy.AddToClassList("cs-tab--active");
                     RefreshGenerationWarning();
-                    RebuildPipelineRows();
-                    break;
-                case "upload":
-                    tabUpload.AddToClassList("cs-tab--active");
-                    RebuildPipelineRows();
+                    RebuildDeployRows();
                     _ = RefreshStackStatusAsync();
                     break;
             }
@@ -187,24 +175,59 @@ namespace ContentRepo.Editor
             };
         }
 
-        // ── Build tab ─────────────────────────────────────────────────────────
+        // ── Deploy tab ────────────────────────────────────────────────────────
 
-        private void WireBuildTab()
+        private void WireDeployTab()
         {
-            bumpGenerationBtn.clicked += () =>
+            bumpGenerationBtn.clicked  += () => { ContentRepoGenerationSettings.instance.BumpGeneration();          RefreshGenerationWarning(); };
+            ackUnityVersionBtn.clicked += () => { ContentRepoGenerationSettings.instance.AcknowledgeUnityVersion(); RefreshGenerationWarning(); };
+            deployRefreshBtn.clicked   += () => _ = RefreshManifestsAsync();
+
+            buildAllBtn.clicked += () => _ = RunPipelineAsync("Building all…",
+                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog); RebuildDeployRows(); },
+                deployLog);
+
+            uploadAllBtn.clicked += () => _ = RunPipelineAsync("Uploading all to staging…",
+                async () => { await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog); await RefreshManifestsAsync(); },
+                deployLog);
+
+            promoteAllBtn.clicked += () =>
             {
-                ContentRepoGenerationSettings.instance.BumpGeneration();
-                RefreshGenerationWarning();
+                var staging    = ContentUploadSettings.instance.StagingPrefix;
+                var production = ContentUploadSettings.instance.ProductionPrefix;
+                if (!EditorUtility.DisplayDialog("Promote all to production",
+                    $"Promote all checked-out packages from {staging} → {production}?\nOnly the manifest is updated — no files move.",
+                    "Promote", "Cancel")) return;
+                _ = RunPipelineAsync("Promoting all → production…",
+                    async () => { await ContentUploadApi.PromoteAllAsync(staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
+                    deployLog);
             };
-            ackUnityVersionBtn.clicked += () =>
+
+            buildAndUploadAllBtn.clicked += () =>
             {
-                ContentRepoGenerationSettings.instance.AcknowledgeUnityVersion();
-                RefreshGenerationWarning();
+                var menu = new GenericMenu();
+                menu.AddItem(new GUIContent("Build and Deploy All"), false, () =>
+                    _ = RunPipelineAsync("Build and Deploy All…",
+                        async () =>
+                        {
+                            await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog);
+                            await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog);
+                            await RefreshManifestsAsync();
+                        }, deployLog));
+                menu.DropDown(buildAndUploadAllBtn.worldBound);
             };
-            buildAllBtn.clicked += () => _ = RunPipelineAsync(
-                "Building all checked-out packages…",
-                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendBuildLog); },
-                buildLog);
+
+            deployLambdaBtn.clicked += () => _ = RunPipelineAsync("Deploying cleanup Lambda…",
+                async () => { await ContentInfraApi.DeployCleanupLambdaAsync(AppendDeployLog); await RefreshStackStatusAsync(); },
+                deployLog);
+
+            teardownLambdaBtn.clicked += () =>
+            {
+                if (!EditorUtility.DisplayDialog("Teardown Lambda", "Delete the content-repo-cleanup CloudFormation stack?", "Teardown", "Cancel")) return;
+                _ = RunPipelineAsync("Tearing down Lambda…",
+                    async () => { await ContentInfraApi.TeardownCleanupLambdaAsync(AppendDeployLog); await RefreshStackStatusAsync(); },
+                    deployLog);
+            };
         }
 
         private void RefreshGenerationWarning()
@@ -232,149 +255,238 @@ namespace ContentRepo.Editor
             }
         }
 
-        // ── Upload tab ────────────────────────────────────────────────────────
-
-        private void WireUploadTab()
-        {
-            envUploadField.RegisterValueChangedCallback(evt => { uploadEnv = (BuildEnvironment)evt.newValue; RebuildPipelineRows(); });
-
-            validateBtn.clicked += () => _ = RunPipelineAsync("Validating credentials…", async () =>
-            {
-                var ok = await ContentUploadProviderFactory.Resolve().ValidateConfigAsync(AppendUploadLog);
-                validateResult.text = ok ? "✓ Credentials valid." : "✗ Validation failed — see log.";
-            }, uploadLog);
-
-            uploadAllBtn.clicked += () => _ = RunPipelineAsync($"Uploading all ({EnvKey()})…",
-                async () => { await ContentUploadApi.UploadAllCheckedOutAsync(EnvKey(), AppendUploadLog); }, uploadLog);
-
-            publishManifestBtn.clicked += () => _ = RunPipelineAsync($"Publishing manifest ({EnvKey()})…",
-                () => ContentUploadApi.PublishManifestAsync(EnvKey(), AppendUploadLog), uploadLog);
-
-            promoteAllBtn.clicked += () =>
-            {
-                var staging = ContentUploadSettings.instance.StagingPrefix;
-                var production = ContentUploadSettings.instance.ProductionPrefix;
-                if (!EditorUtility.DisplayDialog("Promote all to production",
-                    $"Promote all checked-out packages from {staging} → {production}?\nOnly the manifest is updated — no files move.",
-                    "Promote", "Cancel")) return;
-                _ = RunPipelineAsync($"Promoting all → production…",
-                    () => ContentUploadApi.PromoteAllAsync(staging, production, AppendUploadLog), uploadLog);
-            };
-
-            buildAndUploadAllBtn.clicked += () => _ = RunPipelineAsync($"Build + Upload all ({EnvKey()})…",
-                async () =>
-                {
-                    await ContentBuildApi.BuildAllCheckedOutAsync(AppendUploadLog);
-                    await ContentUploadApi.UploadAllCheckedOutAsync(EnvKey(), AppendUploadLog);
-                    await ContentUploadApi.PublishManifestAsync(EnvKey(), AppendUploadLog);
-                }, uploadLog);
-
-            deployLambdaBtn.clicked += () => _ = RunPipelineAsync("Deploying cleanup Lambda…",
-                async () => { await ContentInfraApi.DeployCleanupLambdaAsync(AppendUploadLog); await RefreshStackStatusAsync(); },
-                uploadLog);
-
-            teardownLambdaBtn.clicked += () =>
-            {
-                if (!EditorUtility.DisplayDialog("Teardown Lambda", "Delete the content-repo-cleanup CloudFormation stack?", "Teardown", "Cancel")) return;
-                _ = RunPipelineAsync("Tearing down Lambda…",
-                    async () => { await ContentInfraApi.TeardownCleanupLambdaAsync(AppendUploadLog); await RefreshStackStatusAsync(); },
-                    uploadLog);
-            };
-        }
-
         private async Task RefreshStackStatusAsync()
         {
             try { stackStatusLabel.text = $"Stack: {await ContentInfraApi.GetStackStatusAsync()}"; }
             catch { stackStatusLabel.text = "Stack: unknown"; }
         }
 
-        private string EnvKey() => ContentUploadSettings.instance.GetEnvironmentPrefix(uploadEnv);
-
-        // ── Pipeline rows (Build + Upload tabs) ───────────────────────────────
-
-        private void RebuildPipelineRows()
+        private async Task RefreshManifestsAsync()
         {
-            buildList.Clear(); uploadList.Clear();
-            buildEmpty.style.display = checkedOutFolders.Count == 0 ? DisplayStyle.Flex : DisplayStyle.None;
-            uploadEmpty.style.display = buildEmpty.style.display;
-
-            var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
-            foreach (var pkg in checkedOutFolders.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+            var settings = ContentUploadSettings.instance;
+            try
             {
-                buildList.Add(BuildPipelineRow(pkg, platform, isUpload: false));
-                uploadList.Add(BuildPipelineRow(pkg, platform, isUpload: true));
+                stagingManifest    = await ContentUploadApi.GetManifestAsync(settings.StagingPrefix);
+                productionManifest = await ContentUploadApi.GetManifestAsync(settings.ProductionPrefix);
+            }
+            catch { /* credentials not configured yet */ }
+            RebuildDeployRows();
+            Rebuild();
+            UpdateToolbarVisibility();
+        }
+
+        private void UpdateToolbarVisibility()
+        {
+            if (uploadAllBtn == null || promoteAllBtn == null) return;
+            var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
+
+            var anyUploadNeeded = checkedOutFolders.Any(pkg =>
+            {
+                var stgId        = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+                var buildTs      = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
+                var localBuildId = ContentBuildApi.GetLastBuildResult(pkg)?.BuildId
+                                   ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
+                return buildTs.HasValue && (localBuildId == null || localBuildId != stgId);
+            });
+            uploadAllBtn.style.display = anyUploadNeeded ? DisplayStyle.Flex : DisplayStyle.None;
+
+            var anyPromoteReady = checkedOutFolders.Any(pkg =>
+            {
+                var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+                var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+                return stgId != null && stgId != prdId;
+            });
+            promoteAllBtn.style.display = anyPromoteReady ? DisplayStyle.Flex : DisplayStyle.None;
+        }
+
+        private string StagingKey() => ContentUploadSettings.instance.StagingPrefix;
+
+        // ── Deploy rows ───────────────────────────────────────────────────────
+
+        private void RebuildDeployRows()
+        {
+            deployList.Clear();
+            var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
+
+            var local = checkedOutFolders.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+            deployEmpty.style.display = local.Count == 0 ? DisplayStyle.Flex : DisplayStyle.None;
+            foreach (var pkg in local)
+                deployList.Add(BuildDeployRow(pkg, platform));
+
+            var remoteOnly = GetRemoteOnlyPackages().OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+            if (remoteOnly.Count > 0)
+            {
+                var divider = new Label("Not checked out locally") { style = { opacity = 0.45f, fontSize = 10, marginTop = 6, marginLeft = 8, marginBottom = 2 } };
+                deployList.Add(divider);
+                foreach (var pkg in remoteOnly)
+                    deployList.Add(BuildRemoteOnlyRow(pkg, platform));
             }
         }
 
-        private VisualElement BuildPipelineRow(string pkg, string platform, bool isUpload)
+        private IEnumerable<string> GetRemoteOnlyPackages()
         {
-            var envKey = EnvKey();
-            var row = new VisualElement(); row.AddToClassList("cs-pipeline-row");
+            var local  = new HashSet<string>(checkedOutFolders, StringComparer.OrdinalIgnoreCase);
+            var remote = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (stagingManifest    != null) foreach (var e in stagingManifest.contentPackages)    remote.Add(e.name);
+            if (productionManifest != null) foreach (var e in productionManifest.contentPackages) remote.Add(e.name);
+            return remote.Where(p => !local.Contains(p));
+        }
+
+        private VisualElement BuildRemoteOnlyRow(string pkg, string platform)
+        {
+            var row = new VisualElement(); row.AddToClassList("cs-pipeline-row"); row.AddToClassList("cs-pipeline-row--remote");
 
             var nameLabel = new Label(pkg); nameLabel.AddToClassList("cs-pipeline-name"); row.Add(nameLabel);
 
-            var meta = new Label(); meta.AddToClassList("cs-build-meta");
-            if (isUpload)
-            {
-                var ts = ContentUploadApi.GetLastUploadTimestamp(pkg, platform, envKey);
-                meta.text = ts.HasValue ? $"uploaded {ts.Value.ToLocalTime():MM-dd HH:mm}" : "never uploaded";
-            }
-            else
-            {
-                var ts = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
-                var lastResult = ContentBuildApi.GetLastBuildResult(pkg);
-                var buildIdStr = lastResult != null ? $"  id:{lastResult.BuildId[..8]}" : "";
-                meta.text = ts.HasValue ? $"built {ts.Value.ToLocalTime():MM-dd HH:mm}{buildIdStr}" : "never built";
-            }
-            row.Add(meta);
+            var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+            var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
 
+            // Warning: in production but removed from staging — next promote would leave prod out of sync
+            if (stgId == null && prdId != null)
+            {
+                var warn = new Label("⚠") { tooltip = "This package is in production but not in staging.\nUse 'Restore from production' to re-add it to staging." };
+                warn.AddToClassList("cs-warn-icon");
+                row.Add(warn);
+            }
+
+            row.Add(MakeLiveBadge("staging", stgId));
+            row.Add(MakeProdBadge(prdId, false));
+
+            row.Add(new VisualElement { style = { flexGrow = 1 } });
+
+            var staging    = ContentUploadSettings.instance.StagingPrefix;
+            var production = ContentUploadSettings.instance.ProductionPrefix;
+            var moreBtn = new Button { text = "⋮", tooltip = "More actions" };
+            moreBtn.AddToClassList("cs-icon-btn");
+            moreBtn.AddToClassList("cs-icon-btn--lg");
+            moreBtn.AddToClassList("cs-menu-btn");
+            moreBtn.clicked += () =>
+            {
+                var menu = new GenericMenu();
+                if (prdId != null && prdId != stgId)
+                    menu.AddItem(new GUIContent("Restore from production"), false, () =>
+                        _ = RunPipelineAsync($"Restoring '{pkg}' from production…",
+                            async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, production, staging, AppendDeployLog); await RefreshManifestsAsync(); },
+                            deployLog));
+                if (stgId != null)
+                    menu.AddItem(new GUIContent("Remove from Staging"), false, () =>
+                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
+                            async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
+                            deployLog));
+                if (prdId == null && stgId == null)
+                    menu.AddDisabledItem(new GUIContent("Nothing to restore"));
+                menu.DropDown(moreBtn.worldBound);
+            };
+            row.Add(moreBtn);
+
+            return row;
+        }
+
+        private VisualElement BuildDeployRow(string pkg, string platform)
+        {
+            var row = new VisualElement(); row.AddToClassList("cs-pipeline-row");
+
+            // Name
+            var nameLabel = new Label(pkg); nameLabel.AddToClassList("cs-pipeline-name"); row.Add(nameLabel);
+
+            // Build meta
+            var buildTs = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
+            var lastBuild = ContentBuildApi.GetLastBuildResult(pkg);
+            var buildMeta = new Label(); buildMeta.AddToClassList("cs-build-meta");
+            buildMeta.text = buildTs.HasValue
+                ? $"built {buildTs.Value.ToLocalTime():MM-dd HH:mm}" + (lastBuild != null ? $" · {lastBuild.BuildId[..8]}" : "")
+                : "never built";
+            row.Add(buildMeta);
+
+            // Staging / production live badges
+            var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+            var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+            var promoteReady = stgId != null && stgId != prdId;
+            if (stagingManifest != null || productionManifest != null)
+            {
+                row.Add(MakeLiveBadge("staging", stgId));
+                row.Add(MakeProdBadge(prdId, promoteReady));
+            }
+
+            // Status + spacer
             var status = new Label("idle"); status.AddToClassList("cs-pipeline-status"); status.AddToClassList("cs-pipeline-status--idle");
             row.Add(status);
-            var spacer = new VisualElement { style = { flexGrow = 1 } }; row.Add(spacer);
+            row.Add(new VisualElement { style = { flexGrow = 1 } });
 
-            if (isUpload)
-            {
-                AddBtn(row, "Upload", "btn-upload-package", () => _ = RunPipelineAsync($"Uploading '{pkg}'…",
-                    async () =>
-                    {
-                        SetPipelineStatus(status, "running");
-                        try { await ContentUploadApi.UploadContentPackageAsync(pkg, envKey, log: AppendUploadLog); SetPipelineStatus(status, "ok"); }
-                        catch { SetPipelineStatus(status, "err"); throw; }
-                    }, uploadLog));
-
-                var staging = ContentUploadSettings.instance.StagingPrefix;
-                var production = ContentUploadSettings.instance.ProductionPrefix;
-                AddBtn(row, "Promote → prod", "btn-promote-package", () =>
+            // Build
+            AddIconBtn(row, "hammer", $"Build '{pkg}'", () => _ = RunPipelineAsync($"Building '{pkg}'…",
+                async () =>
                 {
-                    if (!EditorUtility.DisplayDialog("Promote", $"Promote '{pkg}' from {staging} → {production}?", "Promote", "Cancel")) return;
-                    _ = RunPipelineAsync($"Promoting '{pkg}'…",
-                        () => ContentUploadApi.PromoteContentPackageAsync(pkg, staging, production, AppendUploadLog),
-                        uploadLog);
-                });
+                    SetPipelineStatus(status, "running");
+                    try { await ContentBuildApi.BuildContentPackageAsync(pkg, AppendDeployLog); SetPipelineStatus(status, "ok"); RebuildDeployRows(); }
+                    catch { SetPipelineStatus(status, "err"); throw; }
+                }, deployLog));
 
-                AddBtn(row, "Build+Upload", "btn-build-and-upload-package", () => _ = RunPipelineAsync($"Build+Upload '{pkg}'…",
-                    async () =>
-                    {
-                        SetPipelineStatus(status, "running");
-                        try
-                        {
-                            await ContentBuildApi.BuildContentPackageAsync(pkg, AppendUploadLog);
-                            await ContentUploadApi.UploadContentPackageAsync(pkg, envKey, log: AppendUploadLog);
-                            SetPipelineStatus(status, "ok");
-                        }
-                        catch { SetPipelineStatus(status, "err"); throw; }
-                    }, uploadLog));
-            }
-            else
+            // Upload — only shown when there is a local build that differs from what's already on staging.
+            // Use the disk build ID (not session-only GetLastBuildResult) so the check survives Unity restarts.
+            var localBuildId = lastBuild?.BuildId ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
+            var showUpload   = buildTs.HasValue && (localBuildId == null || localBuildId != stgId);
+            var uploadBtn = AddIconBtn(row, "cloud-upload", $"Upload '{pkg}' to staging", () => _ = RunPipelineAsync($"Uploading '{pkg}'…",
+                async () =>
+                {
+                    SetPipelineStatus(status, "running");
+                    try { await ContentUploadApi.UploadContentPackageAsync(pkg, StagingKey(), log: AppendDeployLog); SetPipelineStatus(status, "ok"); }
+                    catch { SetPipelineStatus(status, "err"); throw; }
+                    finally { await RefreshManifestsAsync(); }
+                }, deployLog));
+            uploadBtn.style.display = showUpload ? DisplayStyle.Flex : DisplayStyle.None;
+
+            var staging    = ContentUploadSettings.instance.StagingPrefix;
+            var production = ContentUploadSettings.instance.ProductionPrefix;
+
+            // Promote → production text button (only when staging is ahead of production)
+            var promoteBtn = new Button(() =>
             {
-                AddBtn(row, "Build", "btn-build-package", () => _ = RunPipelineAsync($"Building '{pkg}'…",
-                    async () =>
-                    {
-                        SetPipelineStatus(status, "running");
-                        try { await ContentBuildApi.BuildContentPackageAsync(pkg, AppendBuildLog); SetPipelineStatus(status, "ok"); RebuildPipelineRows(); }
-                        catch { SetPipelineStatus(status, "err"); throw; }
-                    }, buildLog));
-            }
+                if (!EditorUtility.DisplayDialog("Promote", $"Promote '{pkg}' from {staging} → {production}?", "Promote", "Cancel")) return;
+                _ = RunPipelineAsync($"Promoting '{pkg}'…",
+                    async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
+                    deployLog);
+            }) { text = "→ production" };
+            promoteBtn.AddToClassList("cs-text-btn");
+            promoteBtn.AddToClassList("cs-promote-btn");
+            promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
+            row.Add(promoteBtn);
+
+            // ⋮ menu (last) — overflow actions
+            var moreBtn = new Button { text = "⋮", tooltip = "More actions" };
+            moreBtn.AddToClassList("cs-icon-btn");
+            moreBtn.AddToClassList("cs-icon-btn--lg");
+            moreBtn.AddToClassList("cs-menu-btn");
+            moreBtn.clicked += () =>
+            {
+                var menu = new GenericMenu();
+                menu.AddItem(new GUIContent("Build and Deploy"), false, () =>
+                    _ = RunPipelineAsync($"Build and Deploy '{pkg}'…",
+                        async () =>
+                        {
+                            SetPipelineStatus(status, "running");
+                            try
+                            {
+                                await ContentBuildApi.BuildContentPackageAsync(pkg, AppendDeployLog);
+                                await ContentUploadApi.UploadContentPackageAsync(pkg, StagingKey(), log: AppendDeployLog);
+                                SetPipelineStatus(status, "ok");
+                            }
+                            catch { SetPipelineStatus(status, "err"); throw; }
+                            finally { await RefreshManifestsAsync(); }
+                        }, deployLog));
+                if (prdId != null && prdId != stgId)
+                    menu.AddItem(new GUIContent("Restore from production"), false, () =>
+                        _ = RunPipelineAsync($"Restoring '{pkg}' from production…",
+                            async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, production, staging, AppendDeployLog); await RefreshManifestsAsync(); },
+                            deployLog));
+                if (stgId != null)
+                    menu.AddItem(new GUIContent("Remove from Staging"), false, () =>
+                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
+                            async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
+                            deployLog));
+                menu.DropDown(moreBtn.worldBound);
+            };
+            row.Add(moreBtn);
 
             return row;
         }
@@ -384,6 +496,17 @@ namespace ContentRepo.Editor
             var btn = new Button(clicked) { text = text, name = name };
             btn.AddToClassList("cs-text-btn");
             row.Add(btn);
+        }
+
+        private static Button AddIconBtn(VisualElement parent, string iconName, string tooltip, Action clicked)
+        {
+            var btn = new Button(clicked) { tooltip = tooltip };
+            btn.AddToClassList("cs-icon-btn");
+            var img = new Image { image = LoadIcon(iconName), pickingMode = PickingMode.Ignore };
+            img.AddToClassList("cs-icon-image");
+            btn.Add(img);
+            parent.Add(btn);
+            return btn;
         }
 
         private static void SetPipelineStatus(Label status, string state)
@@ -579,7 +702,7 @@ namespace ContentRepo.Editor
             void UpdateRowState(FolderStatus s)
             {
                 latestStatus = s;
-                ApplyBadgeState(badge, isCheckedOut, s);
+                ApplyBadgeState(badge, isCheckedOut, s, folder);
                 var dirty = isCheckedOut && !s.IsClean;
                 pullBtn.style.display  = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
                 pushBtn.style.display  = dirty ? DisplayStyle.Flex : DisplayStyle.None;
@@ -637,7 +760,7 @@ namespace ContentRepo.Editor
             try
             {
                 SetStatus("Refreshing…");
-                await RefreshDataAsync(); Rebuild(); RebuildPipelineRows();
+                await RefreshDataAsync(); Rebuild(); RebuildDeployRows();
                 SetStatus(!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready");
             }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); }
@@ -651,7 +774,7 @@ namespace ContentRepo.Editor
             AppendLog(log, $"--- {statusMessage} ---");
             try { await op(); SetStatus("Done."); }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); AppendLog(log, $"ERROR: {ex.Message}"); Debug.LogException(ex); }
-            finally { RebuildPipelineRows(); SetBusy(false); }
+            finally { RebuildDeployRows(); SetBusy(false); }
         }
 
         private async Task RefreshDataAsync()
@@ -672,8 +795,7 @@ namespace ContentRepo.Editor
             remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
         }
 
-        private void AppendBuildLog(string line) => AppendLog(buildLog, line);
-        private void AppendUploadLog(string line) => AppendLog(uploadLog, line);
+        private void AppendDeployLog(string line) => AppendLog(deployLog, line);
 
         private void AppendLog(Label log, string line)
         {
@@ -725,19 +847,75 @@ namespace ContentRepo.Editor
             finally { polling = false; }
         }
 
-        private static void ApplyBadgeState(VisualElement group, bool isCheckedOut, FolderStatus status)
+        private void ApplyBadgeState(VisualElement group, bool isCheckedOut, FolderStatus status, string pkg)
         {
             group.Clear();
-            if (!isCheckedOut)                             { group.Add(MakeBadge("not checked out", "cs-badge--off")); return; }
-            if (status.IsClean)                            { group.Add(MakeBadge("clean",           "cs-badge--on"));  return; }
-            if (status.Untracked > 0)                      group.Add(MakeBadge($"+{status.Untracked}",              "cs-badge--new"));
-            if (status.Modified + status.Staged > 0)       group.Add(MakeBadge($"{status.Modified + status.Staged}", "cs-badge--modified"));
-            if (status.Deleted > 0)                        group.Add(MakeBadge($"-{status.Deleted}",                "cs-badge--deleted"));
+
+            // Git state
+            if (!isCheckedOut)
+                group.Add(MakeBadge("not checked out", "cs-badge--off"));
+            else if (status.IsClean)
+                group.Add(MakeBadge("clean", "cs-badge--on"));
+            else
+            {
+                if (status.Untracked > 0)                group.Add(MakeBadge($"+{status.Untracked}",               "cs-badge--new"));
+                if (status.Modified + status.Staged > 0) group.Add(MakeBadge($"{status.Modified + status.Staged}", "cs-badge--modified"));
+                if (status.Deleted > 0)                  group.Add(MakeBadge($"-{status.Deleted}",                 "cs-badge--deleted"));
+            }
+
+            // Deploy state — shown for all folders (checked out or not) when manifests are loaded
+            if (stagingManifest == null && productionManifest == null) return;
+            var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
+            var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+            var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
+            if (stgId == null && prdId == null) return;
+
+            var promoteReady = stgId != null && stgId != prdId;
+            if (stgId != null)
+                group.Add(MakeLiveBadge("staging", stgId));
+            group.Add(MakeProdBadge(prdId, promoteReady));
         }
 
-        private static Label MakeBadge(string text, string cls)
+        private static Label MakeBadge(string text, string cls, string tooltip = null)
         {
-            var l = new Label(text);
+            var l = new Label(text) { tooltip = tooltip };
+            l.AddToClassList("cs-badge");
+            l.AddToClassList(cls);
+            return l;
+        }
+
+        private static Label MakeLiveBadge(string env, string buildId)
+        {
+            var text    = buildId != null ? $"{env}: {buildId[..Math.Min(8, buildId.Length)]}" : $"{env}: —";
+            var tooltip = buildId != null ? $"Live on {env}\n{buildId}" : $"Not published to {env}";
+            var l = new Label(text) { tooltip = tooltip };
+            l.AddToClassList("cs-badge");
+            l.AddToClassList(buildId != null ? "cs-badge--stg" : "cs-badge--off");
+            return l;
+        }
+
+        private static Label MakeProdBadge(string prdId, bool promoteReady)
+        {
+            string text; string cls; string tooltip;
+            if (promoteReady)
+            {
+                text    = "→ production ready";
+                cls     = "cs-badge--promote";
+                tooltip = $"Staging has a newer build — ready to promote\nProduction: {prdId ?? "none"}";
+            }
+            else if (prdId != null)
+            {
+                text    = $"production: {prdId[..Math.Min(8, prdId.Length)]}";
+                cls     = "cs-badge--prod";
+                tooltip = $"Live on production\n{prdId}";
+            }
+            else
+            {
+                text    = "production: —";
+                cls     = "cs-badge--off";
+                tooltip = "Not published to production";
+            }
+            var l = new Label(text) { tooltip = tooltip };
             l.AddToClassList("cs-badge");
             l.AddToClassList(cls);
             return l;

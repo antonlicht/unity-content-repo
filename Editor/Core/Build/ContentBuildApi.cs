@@ -275,6 +275,21 @@ namespace ContentRepo.Editor
             return Path.Combine(absRoot, "builds", buildId, platform, contentPackageName);
         }
 
+        public static string GetLatestBuildIdFromDisk(string contentPackageName, string platform)
+        {
+            var root    = ContentBuildSettings.instance.BuildOutputRoot;
+            var absRoot = Path.IsPathRooted(root) ? root : Path.Combine(ContentGitApi.ProjectRoot, root);
+            var buildsRoot = Path.Combine(absRoot, "builds");
+            if (!Directory.Exists(buildsRoot)) return null;
+
+            return Directory.GetDirectories(buildsRoot)
+                .Select(d => ReadMetadata(Path.Combine(d, platform, contentPackageName)))
+                .Where(m => m != null)
+                .OrderByDescending(m => m.builtAt)
+                .Select(m => m.buildId)
+                .FirstOrDefault();
+        }
+
         internal static BuildMetadata ReadMetadata(string artifactPath)
         {
             var path = Path.Combine(artifactPath, "build-metadata.json");

@@ -78,7 +78,14 @@ namespace ContentRepo.Editor
                     container.Add(new PropertyField(so.FindProperty("stagingPrefix"), "Staging environment prefix"));
                     container.Add(new PropertyField(so.FindProperty("productionPrefix"), "Production environment prefix"));
 
-                    var validateBtn = new Button { text = "Validate credentials", style = { marginTop = 10, alignSelf = Align.FlexStart } };
+                    var loginBtn = new Button(AwsLoginWindow.Open)
+                    {
+                        text = "Configure credentials…",
+                        style = { marginTop = 10, alignSelf = Align.FlexStart }
+                    };
+                    container.Add(loginBtn);
+
+                    var validateBtn = new Button { text = "Validate credentials", style = { marginTop = 4, alignSelf = Align.FlexStart } };
                     var resultLabel = new Label("") { style = { marginTop = 6, whiteSpace = WhiteSpace.Normal } };
                     container.Add(validateBtn);
                     container.Add(resultLabel);

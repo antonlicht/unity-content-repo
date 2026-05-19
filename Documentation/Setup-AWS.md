@@ -70,176 +70,157 @@ You should see your account ID and the `admin` user ARN.
 
 ## 6. Create the S3 bucket
 
-```bash
-aws s3api create-bucket \
-  --bucket your-bucket-name \
-  --region eu-central-1 \
-  --create-bucket-configuration LocationConstraint=eu-central-1
-```
-
-Block all public access (CloudFront reads the bucket via Origin Access Control, not the public web):
-
-```bash
-aws s3api put-public-access-block \
-  --bucket your-bucket-name \
-  --public-access-block-configuration \
-  "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-```
+1. In the AWS console, search for **S3** and open it.
+2. Click **Create bucket**.
+3. Enter a **Bucket name** (e.g. `my-studio-content`) — must be globally unique.
+4. Set **AWS Region** to your target region (e.g. `eu-central-1`).
+5. Under **Object Ownership**, leave it at **ACLs disabled**.
+6. Under **Block Public Access settings**, leave all four checkboxes ticked. CloudFront will read the bucket via Origin Access Control — public access is not needed.
+7. Leave all other settings at their defaults and click **Create bucket**.
 
 ## 7. Create the CloudFront distribution
 
-Create an Origin Access Control (OAC) in S3-signing mode:
+1. In the AWS console, search for **CloudFront** and open it.
+2. Click **Create distribution**. If asked to choose a plan, select **Standard** and click **Next**.
 
-```bash
-aws cloudfront create-origin-access-control \
-  --origin-access-control-config \
-  Name=content-repo-oac,SigningProtocol=sigv4,SigningBehavior=always,OriginAccessControlOriginType=s3
-```
+**Step 2 — Get started**
 
-Note the returned `Id` — you will paste it into the distribution config below.
+3. Enter a **Distribution name** (e.g. `content-repo`).
+4. Keep **Distribution type** set to **Single website or app**.
+5. Leave the **Domain** field empty and click **Next**.
 
-Create the distribution (paste the OAC `Id` and bucket name into the JSON):
+**Step 3 — Specify origin**
 
-```bash
-cat > /tmp/cf-config.json <<'EOF'
-{
-  "CallerReference": "content-repo-init",
-  "Comment": "Content Repo CDN",
-  "Enabled": true,
-  "Origins": {
-    "Quantity": 1,
-    "Items": [{
-      "Id": "s3-content",
-      "DomainName": "your-bucket-name.s3.eu-central-1.amazonaws.com",
-      "S3OriginConfig": { "OriginAccessIdentity": "" },
-      "OriginAccessControlId": "PASTE_OAC_ID_HERE"
-    }]
-  },
-  "DefaultCacheBehavior": {
-    "TargetOriginId": "s3-content",
-    "ViewerProtocolPolicy": "redirect-to-https",
-    "AllowedMethods": { "Quantity": 2, "Items": ["GET","HEAD"], "CachedMethods": { "Quantity": 2, "Items": ["GET","HEAD"] } },
-    "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6"
-  }
-}
-EOF
+6. Under **Origin type**, keep **Amazon S3** selected.
+7. Click **Browse S3** and select your bucket, or type its URL directly (e.g. `your-bucket-name.s3.eu-central-1.amazonaws.com`).
+8. Under **Settings**, tick **Allow private S3 bucket access to CloudFront — Recommended**. This creates the Origin Access Control automatically.
+9. Leave **Use recommended origin settings** selected.
+10. Click **Next** through **Enable security**, leaving defaults, then click **Create distribution** on the review page.
 
-aws cloudfront create-distribution --distribution-config file:///tmp/cf-config.json
-```
+AWS will show a banner: **"You must update the S3 bucket policy"**. Click **Copy policy**, then:
 
-Record the returned `DistributionId` and `DomainName` (e.g. `d111111abcdef8.cloudfront.net`) — both go into Project Settings later.
+11. Open **S3 > your bucket > Permissions > Bucket policy**, click **Edit**, paste the copied policy, and click **Save changes**.
 
-Allow CloudFront to read from the bucket:
+Record the distribution's **ID** and **Domain name** (e.g. `d111111abcdef8.cloudfront.net`) from the distribution list — both go into Project Settings in step 10.
 
-```bash
-cat > /tmp/bucket-policy.json <<'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "AllowCloudFrontServicePrincipalReadOnly",
-    "Effect": "Allow",
-    "Principal": { "Service": "cloudfront.amazonaws.com" },
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::your-bucket-name/*",
-    "Condition": {
-      "StringEquals": {
-        "AWS:SourceArn": "arn:aws:cloudfront::your-account-id:distribution/PASTE_DISTRIBUTION_ID"
-      }
-    }
-  }]
-}
-EOF
+If your Addressables build uses `UnityWebRequest` from a domain other than the CDN host, also add a CORS configuration:
 
-aws s3api put-bucket-policy \
-  --bucket your-bucket-name \
-  --policy file:///tmp/bucket-policy.json
-```
+9. In S3, go to **your bucket > Permissions > Cross-origin resource sharing (CORS)**, click **Edit**, paste the following, and click **Save changes**:
 
-If your Addressables build uses `UnityWebRequest` from a domain other than the CDN host, add a CORS configuration:
-
-```bash
-cat > /tmp/cors.json <<'EOF'
-{
-  "CORSRules": [{
-    "AllowedOrigins": ["*"],
-    "AllowedMethods": ["GET","HEAD"],
-    "AllowedHeaders": ["*"],
-    "MaxAgeSeconds": 3000
-  }]
-}
-EOF
-
-aws s3api put-bucket-cors \
-  --bucket your-bucket-name \
-  --cors-configuration file:///tmp/cors.json
+```json
+[{
+  "AllowedOrigins": ["*"],
+  "AllowedMethods": ["GET", "HEAD"],
+  "AllowedHeaders": ["*"],
+  "MaxAgeSeconds": 3000
+}]
 ```
 
 ## 8. Create the IAM publisher user
 
-This is the minimal-permission user whose credentials you store in Unity. It can only read/write/delete inside your bucket and trigger CloudFront invalidations — nothing else.
+This is the minimal-permission user whose credentials you share with Unity. It can only read/write/delete inside your bucket, trigger CloudFront invalidations, and deploy the cleanup Lambda stack — nothing else.
 
-```bash
-aws iam create-user --user-name content-repo-publisher
-aws iam create-access-key --user-name content-repo-publisher
-```
+**Create the user and get its access key:**
 
-**Save the returned `AccessKeyId` and `SecretAccessKey`** — you'll enter them in step 9.
+1. In the AWS console, open **IAM > Users** and click **Create user**.
+2. Enter a username (e.g. `vampire-therapist-publisher`) and click **Next**.
+3. Leave permissions blank for now — click **Next → Create user**.
+4. Open the newly created user, go to the **Security credentials** tab, and click **Create access key**.
+5. Select **Command Line Interface (CLI)**, acknowledge the warning, and click **Next → Create access key**.
+6. **Copy and save the Access Key ID and Secret Access Key** — the secret is shown only once.
 
-Attach the inline policy:
+**Attach the inline policy:**
 
-```bash
-cat > /tmp/publisher-policy.json <<'EOF'
+7. Still on the user page, go to the **Permissions** tab and click **Add permissions → Create inline policy**.
+8. Select the **JSON** tab, delete the placeholder, and paste the policy below.
+9. Replace every `<placeholder>` with your actual value (the fixed names like `content-repo-cleanup-role` must stay exactly as shown — they are hardcoded in the CloudFormation template):
+
+```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Action": ["s3:ListBucket"],
-      "Resource": "arn:aws:s3:::your-bucket-name"
+      "Resource": "arn:aws:s3:::<bucket-name>"
     },
     {
       "Effect": "Allow",
       "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::your-bucket-name/*"
+      "Resource": "arn:aws:s3:::<bucket-name>/*"
     },
     {
       "Effect": "Allow",
       "Action": ["cloudfront:CreateInvalidation","cloudfront:GetInvalidation"],
-      "Resource": "arn:aws:cloudfront::your-account-id:distribution/PASTE_DISTRIBUTION_ID"
+      "Resource": "arn:aws:cloudfront::<account-id>:distribution/<distribution-id>"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["cloudformation:GetTemplateSummary"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks",
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet"
+      ],
+      "Resource": "arn:aws:cloudformation:<region>:<account-id>:stack/content-repo-cleanup/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole","iam:DeleteRole","iam:GetRole","iam:PassRole",
+        "iam:AttachRolePolicy","iam:DetachRolePolicy",
+        "iam:PutRolePolicy","iam:DeleteRolePolicy","iam:GetRolePolicy","iam:TagRole"
+      ],
+      "Resource": "arn:aws:iam::<account-id>:role/content-repo-cleanup-role"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration",
+        "lambda:GetFunction","lambda:GetFunctionConfiguration","lambda:DeleteFunction",
+        "lambda:AddPermission","lambda:RemovePermission","lambda:GetPolicy","lambda:TagResource"
+      ],
+      "Resource": "arn:aws:lambda:<region>:<account-id>:function:content-repo-cleanup"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule","events:DeleteRule","events:DescribeRule",
+        "events:PutTargets","events:RemoveTargets","events:ListTargetsByRule"
+      ],
+      "Resource": "arn:aws:events:<region>:<account-id>:rule/content-repo-cleanup-daily"
     }
   ]
 }
-EOF
-
-aws iam put-user-policy \
-  --user-name content-repo-publisher \
-  --policy-name content-repo-publisher \
-  --policy-document file:///tmp/publisher-policy.json
 ```
 
-## 9. Switch the CLI to the publisher credentials
+10. Click **Next**, name the policy `content-repo-publisher`, and click **Create policy**.
 
-Unity's **Validate credentials** button calls the CLI as the current default profile, so point it at the publisher user:
-
-```bash
-aws configure
-```
-
-Enter the `content-repo-publisher` Access Key ID and Secret Access Key from step 8. Leave region and output format unchanged.
-
-Alternatively, use a named profile and set `AWS_PROFILE=content-repo-publisher` in your environment so the admin credentials remain the default.
-
-## 10. Configure and validate in Unity
+## 9. Configure credentials in Unity
 
 1. Open **Project Settings > Content Repo > Upload**.
 2. Fill in:
-   - **S3 bucket name** — `your-bucket-name`
+   - **S3 bucket name** — your bucket name from step 6
    - **S3 region** — e.g. `eu-central-1`
    - **CloudFront distribution ID** — from step 7
    - **CloudFront domain** — e.g. `d111111abcdef8.cloudfront.net`
-3. Click **Validate credentials**.
+3. Click **Configure credentials…** and enter the Access Key ID and Secret Access Key from step 8.
+4. Click **Validate credentials** to confirm everything is wired up correctly.
    - On success: `✓ Credentials valid and bucket reachable.`
-   - On failure: read the error in the inline message and console — common causes are missing AWS CLI on PATH, wrong region, or a typo in the bucket name.
+   - On failure: read the error in the console — common causes are missing AWS CLI on PATH, wrong region, or a typo in the bucket name.
+
+> If you prefer to configure credentials on the command line instead: run `aws configure` and enter the publisher user's key and secret. The Unity button is a convenience wrapper around the same `aws configure set` commands.
 
 ---
 
