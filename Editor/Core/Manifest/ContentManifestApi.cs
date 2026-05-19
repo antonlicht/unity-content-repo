@@ -60,6 +60,29 @@ namespace ContentRepo.Editor
         }
 
         /// <summary>
+        /// Removes a single content package entry from the manifest for the given environment.
+        /// Other packages are untouched.
+        /// </summary>
+        public static async Task RemoveEntryAsync(
+            string environment,
+            string generation,
+            string contentPackageName,
+            IContentUploadProvider provider,
+            UploadLogHandler log = null)
+        {
+            var remoteKey = $"{generation}/{environment}/{ManifestFileName}";
+            var existingJson = await provider.DownloadTextAsync(remoteKey);
+            var manifest = ContentManifest.FromJson(existingJson);
+            if (manifest == null) return;
+
+            manifest.contentPackages.RemoveAll(e => string.Equals(e.name, contentPackageName, StringComparison.Ordinal));
+            manifest.updatedAt = DateTime.UtcNow.ToString("O");
+
+            log?.Invoke($"[Manifest] Removing '{contentPackageName}' from {environment} manifest.");
+            await UploadManifestAsync(manifest, remoteKey, provider, log);
+        }
+
+        /// <summary>
         /// Updates only the app-version fields on an existing manifest without touching content packages.
         /// </summary>
         public static async Task SetAppVersionsAsync(

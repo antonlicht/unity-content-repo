@@ -364,6 +364,58 @@
     margin-left: 6px;
 }
 
+.cs-live-badge--on {
+    opacity: 1;
+    color: rgb(80, 180, 100);
+}
+
+.cs-live-badge--off {
+    opacity: 0.4;
+}
+
+.cs-live-badge--promote {
+    opacity: 1;
+    color: rgb(220, 160, 30);
+}
+
+.cs-badge--stg {
+    background-color: rgba(60, 180, 80, 0.2);
+    color: rgb(80, 200, 100);
+}
+
+.cs-badge--prod {
+    background-color: rgba(60, 120, 220, 0.2);
+    color: rgb(90, 150, 240);
+}
+
+.cs-badge--promote {
+    background-color: rgba(220, 160, 30, 0.2);
+    color: rgb(230, 170, 40);
+}
+
+.cs-promote-btn {
+    color: rgb(90, 150, 240);
+}
+
+.cs-menu-btn {
+    font-size: 18px;
+    -unity-font-style: bold;
+    padding: 0;
+    letter-spacing: 0;
+}
+
+.cs-pipeline-row--remote {
+    opacity: 0.5;
+}
+
+.cs-warn-icon {
+    color: rgb(220, 80, 80);
+    font-size: 12px;
+    margin-left: 4px;
+    margin-right: 2px;
+    -unity-font-style: bold;
+}
+
 .cs-expand-btn {
     width: 14px;
     min-width: 14px;
