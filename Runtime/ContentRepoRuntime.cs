@@ -29,6 +29,9 @@ namespace ContentRepo
         public bool Success;
         public string Error;
         public IResourceLocator Locator;
+        // Kept alive so the catalog stays registered with Addressables.
+        // Call Addressables.Release(result.Handle) when this content package is unloaded.
+        public AsyncOperationHandle<IResourceLocator> Handle;
     }
 
     public static class ContentRepoRuntime
@@ -146,14 +149,26 @@ namespace ContentRepo
                     continue;
                 }
 
+                var handle = new AsyncOperationHandle<IResourceLocator>();
                 try
                 {
-                    var handle = Addressables.LoadContentCatalogAsync(platformEntry.catalogUrl, autoReleaseHandle: true);
-                    var locator = await handle.Task;
-                    if (handle.Status != AsyncOperationStatus.Succeeded || locator == null)
-                        throw new InvalidOperationException(
-                            handle.OperationException?.Message ?? "Catalog load returned null locator.");
+                    handle = Addressables.LoadContentCatalogAsync(platformEntry.catalogUrl, autoReleaseHandle: false);
 
+                    // Swallow the task exception — the real error is on handle.OperationException.
+                    IResourceLocator locator = null;
+                    try { locator = await handle.Task; } catch { /* see handle.OperationException */ }
+
+                    if (handle.Status != AsyncOperationStatus.Succeeded || locator == null)
+                    {
+                        var reason = handle.OperationException?.Message
+                            ?? (locator == null ? "Catalog load returned null locator." : "Operation did not succeed.");
+                        Addressables.Release(handle);
+                        throw new InvalidOperationException(reason);
+                    }
+
+                    // Keep the handle alive — releasing it unregisters the locator from Addressables.
+                    // The caller must call Addressables.Release(result.Handle) when unloading this package.
+                    item.Handle  = handle;
                     item.Locator = locator;
                     item.Success = true;
                     LoadedVersions[cacheKey] = platformEntry.buildId ?? "";
@@ -161,7 +176,7 @@ namespace ContentRepo
                 catch (Exception ex)
                 {
                     item.Success = false;
-                    item.Error = ex.Message;
+                    item.Error   = ex.Message;
                     Debug.LogError(
                         $"[ContentRepo] Catalog load failed for '{entry.name}' ({platformEntry.catalogUrl}): {ex.Message}");
                 }

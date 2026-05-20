@@ -19,6 +19,9 @@ namespace ContentRepo
             if (string.IsNullOrWhiteSpace(environment)) throw new ArgumentException("environment required.", nameof(environment));
             if (string.IsNullOrWhiteSpace(generation)) throw new ArgumentException("generation required.", nameof(generation));
 
+            if (!baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                baseUrl = "https://" + baseUrl;
             var url = $"{baseUrl.TrimEnd('/')}/{generation}/{environment}/{ManifestFileName}";
             try
             {
@@ -60,6 +63,14 @@ namespace ContentRepo
                 File.WriteAllText(path, json);
             }
             catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Cache write failed: {ex.Message}"); }
+        }
+
+        public static async Task<ContentManifestEntry> ResolveAsync(
+            string baseUrl, string environment, string generation,
+            string contentPackageName, CancellationToken ct = default)
+        {
+            var manifest = await FetchAsync(baseUrl, environment, generation, ct);
+            return manifest?.Find(contentPackageName);
         }
 
         public static void ClearCache(string environment, string generation)

@@ -43,6 +43,11 @@ namespace ContentRepo.Editor
 
     public static class ContentGitApi
     {
+        // Top-level folder in the content repo that always stays checked out.
+        // It holds Addressable group .asset files so GUID stability is preserved
+        // across developers and CI without requiring the package content to be present.
+        public const string GroupsFolderName = "_groups";
+
         public static event Action OnStateChanged;
 
         /// <summary>
@@ -112,7 +117,9 @@ namespace ContentRepo.Editor
             }
 
             await RunGitCommandAsync("sparse-checkout init --cone", subPath);
-            await RunGitCommandAsync("sparse-checkout set", subPath);
+            // Always check out _groups so Addressable group GUIDs are available
+            // even when no package content is checked out.
+            await RunGitCommandAsync($"sparse-checkout set {Quote(GroupsFolderName)}", subPath);
 
             // Write a .gitignore next to the cloned directory so the parent repo
             // never shows the content folder or its Unity .meta file as noise.
@@ -202,7 +209,7 @@ namespace ContentRepo.Editor
                 if (meta.Length < 2 || meta[1] != "tree") continue;
 
                 var name = line.Substring(tab + 1).Trim();
-                if (!string.IsNullOrEmpty(name))
+                if (!string.IsNullOrEmpty(name) && !name.Equals(GroupsFolderName, StringComparison.OrdinalIgnoreCase))
                     folders.Add(name);
             }
 
@@ -218,7 +225,8 @@ namespace ContentRepo.Editor
                 return output
                     .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                     .Select(s => s.Trim().Trim('/'))
-                    .Where(s => !string.IsNullOrEmpty(s))
+                    // _groups is a system folder managed by the package, not a user content package.
+                    .Where(s => !string.IsNullOrEmpty(s) && !s.Equals(GroupsFolderName, StringComparison.OrdinalIgnoreCase))
                     .ToList();
             }
             catch
@@ -325,20 +333,12 @@ namespace ContentRepo.Editor
         {
             ValidateFolderName(folder);
 
-            var current = await GetCheckedOutFoldersAsync();
+            var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var remaining = current
                 .Where(f => !f.Equals(folder, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (remaining.Count == 0)
-            {
-                await RunGitCommandAsync("sparse-checkout set", ContentAbsolutePath);
-            }
-            else
-            {
-                var args = string.Join(" ", remaining.Select(Quote));
-                await RunGitCommandAsync($"sparse-checkout set {args}", ContentAbsolutePath);
-            }
+                .Prepend(GroupsFolderName) // always keep _groups checked out
+                .Select(Quote);
+            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", remaining)}", ContentAbsolutePath);
 
             var localFolder = Path.Combine(ContentAbsolutePath, folder);
             if (Directory.Exists(localFolder))
@@ -427,7 +427,7 @@ namespace ContentRepo.Editor
 
             // Replace old name in sparse-checkout; if the folder wasn't checked out
             // before, restore to the state it was in (exclude the renamed folder).
-            var current = await GetCheckedOutFoldersAsync();
+            var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var updated = current
                 .Select(f => string.Equals(f, oldFolder, StringComparison.OrdinalIgnoreCase) ? newFolder : f)
                 .ToList();
@@ -435,10 +435,8 @@ namespace ContentRepo.Editor
             if (!wasCheckedOut)
                 updated.Remove(newFolder);
 
-            if (updated.Count == 0)
-                await RunGitCommandAsync("sparse-checkout set", ContentAbsolutePath);
-            else
-                await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", updated.Select(Quote))}", ContentAbsolutePath);
+            updated.Insert(0, GroupsFolderName); // always keep _groups checked out
+            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", updated.Select(Quote))}", ContentAbsolutePath);
 
             NotifyChange();
             AssetDatabase.Refresh();
@@ -468,11 +466,21 @@ namespace ContentRepo.Editor
             if (string.IsNullOrWhiteSpace(commitMessage))
                 throw new ArgumentException("Commit message cannot be empty.", nameof(commitMessage));
 
+            // Stage package content normally.
             await RunGitCommandAsync($"add -- {Quote(folder)}", ContentAbsolutePath);
+
+            // Stage the Addressable group file with --sparse: _groups/ files are created by the
+            // build and may not yet be part of the sparse-checkout worktree definition, so a plain
+            // git add would refuse them. --sparse stages them without expanding the worktree.
+            var groupFile = $"{GroupsFolderName}/{folder}.asset";
+            var groupMeta = groupFile + ".meta";
+            await RunGitCommandAsync(
+                $"add --sparse -- {Quote(groupFile)} {Quote(groupMeta)}",
+                ContentAbsolutePath);
 
             var statusOut = await RunGitCommandAsync("diff --cached --name-only", ContentAbsolutePath);
             if (string.IsNullOrWhiteSpace(statusOut))
-                throw new InvalidOperationException($"No staged changes inside '{folder}'.");
+                throw new InvalidOperationException($"No staged changes in '{folder}' or its Addressable group files.");
 
             await RunGitCommandAsync($"commit -m {Quote(commitMessage)}", ContentAbsolutePath);
             await TryRemoteAsync("push", () => RunGitCommandAsync(

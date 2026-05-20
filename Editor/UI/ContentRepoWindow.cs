@@ -271,7 +271,7 @@ namespace ContentRepo.Editor
             }
             catch { /* credentials not configured yet */ }
             RebuildDeployRows();
-            Rebuild();
+            if (!busy) Rebuild();
             UpdateToolbarVisibility();
         }
 
@@ -283,10 +283,9 @@ namespace ContentRepo.Editor
             var anyUploadNeeded = checkedOutFolders.Any(pkg =>
             {
                 var stgId        = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
-                var buildTs      = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
                 var localBuildId = ContentBuildApi.GetLastBuildResult(pkg)?.BuildId
                                    ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
-                return buildTs.HasValue && (localBuildId == null || localBuildId != stgId);
+                return localBuildId != null && localBuildId != stgId;
             });
             uploadAllBtn.style.display = anyUploadNeeded ? DisplayStyle.Flex : DisplayStyle.None;
 
@@ -389,13 +388,16 @@ namespace ContentRepo.Editor
             // Name
             var nameLabel = new Label(pkg); nameLabel.AddToClassList("cs-pipeline-name"); row.Add(nameLabel);
 
-            // Build meta
-            var buildTs = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
+            // Build meta label — prefer session timestamp, fall back to disk artifact info.
+            var buildTs   = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
             var lastBuild = ContentBuildApi.GetLastBuildResult(pkg);
+            var localBuildId = lastBuild?.BuildId ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
             var buildMeta = new Label(); buildMeta.AddToClassList("cs-build-meta");
             buildMeta.text = buildTs.HasValue
                 ? $"built {buildTs.Value.ToLocalTime():MM-dd HH:mm}" + (lastBuild != null ? $" · {lastBuild.BuildId[..8]}" : "")
-                : "never built";
+                : localBuildId != null
+                    ? $"local: {localBuildId[..Math.Min(8, localBuildId.Length)]}"
+                    : "never built";
             row.Add(buildMeta);
 
             // Staging / production live badges
@@ -422,10 +424,10 @@ namespace ContentRepo.Editor
                     catch { SetPipelineStatus(status, "err"); throw; }
                 }, deployLog));
 
-            // Upload — only shown when there is a local build that differs from what's already on staging.
-            // Use the disk build ID (not session-only GetLastBuildResult) so the check survives Unity restarts.
-            var localBuildId = lastBuild?.BuildId ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
-            var showUpload   = buildTs.HasValue && (localBuildId == null || localBuildId != stgId);
+            // Upload — shown whenever there is a local build artifact that differs from staging.
+            // Intentionally does NOT require a session timestamp so it works after Unity restarts
+            // or when artifacts were produced by CI and copied locally.
+            var showUpload = localBuildId != null && localBuildId != stgId;
             var uploadBtn = AddIconBtn(row, "cloud-upload", $"Upload '{pkg}' to staging", () => _ = RunPipelineAsync($"Uploading '{pkg}'…",
                 async () =>
                 {
@@ -609,7 +611,8 @@ namespace ContentRepo.Editor
 
                 foreach (var fc in mainFiles)
                 {
-                    var rel  = fc.Path.Length > folder.Length + 1 ? fc.Path.Substring(folder.Length + 1) : fc.Path;
+                    var pfx = folder + "/";
+                    var rel  = fc.Path.StartsWith(pfx, StringComparison.OrdinalIgnoreCase) ? fc.Path.Substring(pfx.Length) : fc.Path;
                     var assetPath = fc.Kind != ChangeKind.Deleted ? $"{localPath}/{fc.Path}" : null;
                     var hasMeta = metaSet.Contains(fc.Path + ".meta");
                     var entry = MakeFileEntry(rel, fc.Kind, fc.Path, assetPath, hasMeta);
@@ -733,8 +736,9 @@ namespace ContentRepo.Editor
             void PromptAndCommit()
             {
                 var autoMsg   = $"Content Updates {folder}";
+                var pfx       = folder + "/";
                 var fileNames = (latestStatus.Files ?? new List<FileChange>())
-                    .Select(f => f.Path.Length > folder.Length + 1 ? f.Path.Substring(folder.Length + 1) : f.Path)
+                    .Select(f => f.Path.StartsWith(pfx, StringComparison.OrdinalIgnoreCase) ? f.Path.Substring(pfx.Length) : f.Path)
                     .ToList();
                 CommitConfirmWindow.Show(autoMsg, fileNames,
                     msg => _ = RunAsync($"Committing '{folder}'…", () => ContentGitApi.CommitAndPushFolderAsync(folder, msg)));
@@ -760,7 +764,7 @@ namespace ContentRepo.Editor
             try
             {
                 SetStatus("Refreshing…");
-                await RefreshDataAsync(); Rebuild(); RebuildDeployRows();
+                await RefreshDataAsync(); Rebuild(); RebuildDeployRows(); UpdateToolbarVisibility();
                 SetStatus(!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready");
             }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); }
@@ -787,12 +791,56 @@ namespace ContentRepo.Editor
             try { checkedOutFolders = await ContentGitApi.GetCheckedOutFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Checked-out folders: {ex.Message}"); }
 
             var allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
+            MergeGroupsStatusInto(checkedOutFolders, allStatuses);
             foreach (var f in checkedOutFolders)
             {
                 if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase))) remoteFolders.Add(f);
                 allStatuses.TryGetValue(f, out var s); folderStatuses[f] = s;
             }
             remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
+        }
+
+        // Distributes _groups/<GroupFile> status entries to the content package they belong to,
+        // so group file changes appear under their package row rather than as an orphan _groups entry.
+        private static void MergeGroupsStatusInto(IReadOnlyList<string> packages, Dictionary<string, FolderStatus> statuses)
+        {
+            if (!statuses.TryGetValue(ContentGitApi.GroupsFolderName, out var groupsStatus) || groupsStatus.Files == null)
+                return;
+
+            foreach (var fc in groupsStatus.Files)
+            {
+                var pkg   = ExtractPackageFromGroupFile(fc.Path);
+                var match = pkg == null ? null : packages.FirstOrDefault(p => p.Equals(pkg, StringComparison.OrdinalIgnoreCase));
+                if (match == null) continue;
+
+                statuses.TryGetValue(match, out var s);
+                if (s.Files == null) s.Files = new List<FileChange>();
+                s.Files.Add(fc);
+                if (!fc.Path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                {
+                    switch (fc.Kind)
+                    {
+                        case ChangeKind.Added:    s.Untracked++; break;
+                        case ChangeKind.Modified: s.Modified++;  break;
+                        case ChangeKind.Deleted:  s.Deleted++;   break;
+                    }
+                }
+                statuses[match] = s;
+            }
+        }
+
+        private static string ExtractPackageFromGroupFile(string repoRelativePath)
+        {
+            // Group files are named <PackageName>.asset — strip extensions to recover the name.
+            // Only files directly inside _groups/ are considered; ignore anything deeper.
+            var parts = repoRelativePath.Replace('\\', '/').Split('/');
+            if (parts.Length != 2 || !parts[0].Equals(ContentGitApi.GroupsFolderName, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var file = parts[1];
+            if (file.EndsWith(".meta",  StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 5);
+            if (file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 6);
+            return string.IsNullOrEmpty(file) ? null : file;
         }
 
         private void AppendDeployLog(string line) => AppendLog(deployLog, line);
@@ -841,6 +889,7 @@ namespace ContentRepo.Editor
             try
             {
                 var statuses = await ContentGitApi.GetAllFolderStatusesAsync();
+                MergeGroupsStatusInto(checkedOutFolders, statuses);
                 foreach (var kvp in rowUpdaters) { statuses.TryGetValue(kvp.Key, out var s); kvp.Value(s); if (checkedOutFolders.Any(c => c.Equals(kvp.Key, StringComparison.OrdinalIgnoreCase))) folderStatuses[kvp.Key] = s; }
             }
             catch (Exception ex) { Debug.LogWarning($"Status poll: {ex.Message}"); }

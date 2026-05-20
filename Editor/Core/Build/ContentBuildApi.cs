@@ -84,8 +84,11 @@ namespace ContentRepo.Editor
                     $"Addressables profile '{buildSettings.AddressablesProfileName}' not found. " +
                     $"Configure it under Project Settings > Content Repo > Build.");
 
-            var previousActiveProfile = settings.activeProfileId;
-            var previousPlayerVersion = settings.OverridePlayerVersion;
+            var previousActiveProfile    = settings.activeProfileId;
+            var previousPlayerVersion    = settings.OverridePlayerVersion;
+            var previousBuildRemoteCatalog    = settings.BuildRemoteCatalog;
+            var previousRemoteCatalogBuildId  = settings.RemoteCatalogBuildPath.Id;
+            var previousRemoteCatalogLoadId   = settings.RemoteCatalogLoadPath.Id;
 
             // CreateValue is required before SetValue — ensure both profile variables exist.
             // Use activeProfileId here because we haven't switched to profileId yet.
@@ -112,6 +115,26 @@ namespace ContentRepo.Editor
                     schema.IncludeInBuild = false;
                 }
 
+                // Warn about groups that aren't managed by ContentRepo but were marked IncludeInBuild.
+                // A ContentRepo-managed group lives inside the _groups/ folder of the content repo.
+                // Others are excluded from content builds (handled above) but should be removed or
+                // left with IncludeInBuild=false to avoid confusion.
+                var repoLocalPath = ContentRepoSettings.instance.LocalPath.Replace('\\', '/').TrimEnd('/');
+                var managedFolderMarker = $"/{ContentGitApi.GroupsFolderName}/";
+                foreach (var kv in disabledStates)
+                {
+                    if (!kv.Value) continue;
+                    var groupAssetPath = AssetDatabase.GetAssetPath(kv.Key).Replace('\\', '/');
+                    var isManaged = groupAssetPath.Contains(managedFolderMarker)
+                                 || kv.Key.Name.StartsWith(SharedGroupPrefix, StringComparison.Ordinal);
+                    if (!isManaged)
+                    {
+                        log?.Invoke($"[Build] WARNING: Group '{kv.Key.Name}' has IncludeInBuild=true and is not managed " +
+                                    "by ContentRepo. It is excluded from this content build. " +
+                                    "Consider removing it or setting IncludeInBuild=false.");
+                    }
+                }
+
                 tempGroup = CreateTemporaryGroup(settings, contentPackageName, profileId, buildSettings, log);
 
                 // Wipe the Addressables build output so stale bundles from previous runs
@@ -125,6 +148,13 @@ namespace ContentRepo.Editor
 
                 settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder);
                 settings.OverridePlayerVersion = contentPackageName;
+
+                // Enable remote catalog generation so catalog_<pkg>.json and .hash are
+                // written into buildOutputPath alongside the bundles and picked up by the
+                // artifact copy step.
+                settings.BuildRemoteCatalog = true;
+                settings.RemoteCatalogBuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
+                settings.RemoteCatalogLoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
 
                 log?.Invoke("[Build] Load path set to placeholder. Building…");
 
@@ -195,6 +225,11 @@ namespace ContentRepo.Editor
                 settings.profileSettings.SetValue(profileId, buildSettings.RemoteLoadPathVariableName, previousLoadPath);
                 settings.activeProfileId = previousActiveProfile;
                 settings.OverridePlayerVersion = previousPlayerVersion;
+                settings.BuildRemoteCatalog = previousBuildRemoteCatalog;
+                if (previousRemoteCatalogBuildId != null)
+                    settings.RemoteCatalogBuildPath.SetVariableById(settings, previousRemoteCatalogBuildId);
+                if (previousRemoteCatalogLoadId != null)
+                    settings.RemoteCatalogLoadPath.SetVariableById(settings, previousRemoteCatalogLoadId);
 
                 AssetDatabase.SaveAssets();
 
@@ -323,9 +358,11 @@ namespace ContentRepo.Editor
             log?.Invoke($"[Build] Created missing profile variable '{variableName}' (default: '{defaultValue}')");
         }
 
-        // ── Temporary group management ────────────────────────────────────────
+        // ── Package group management ──────────────────────────────────────────
 
-        private static readonly string TempGroupPrefix = "__ContentRepo_Temp_";
+        // Prefix reserved for future shared-asset groups (engine fonts, shaders, etc.)
+        // that stay enabled during content builds so their assets aren't re-bundled.
+        public const string SharedGroupPrefix = "__ContentRepo_Shared_";
 
         private static AddressableAssetGroup CreateTemporaryGroup(
             AddressableAssetSettings settings,
@@ -355,16 +392,17 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException(
                     $"No assets found under '{contentAssetPath}'. Check the folder contains importable assets.");
 
-            // Remove any leftover temp group from a previous failed build.
-            var groupName = $"{TempGroupPrefix}{contentPackageName}";
+            // Group is simply named after the content package — no prefix needed since the
+            // group file lives in _groups/ which already provides the namespace.
+            var groupsFolder = $"{repoLocalPath}/{ContentGitApi.GroupsFolderName}";
 
-            // Reuse an existing temp group to keep its GUID stable — bundle hashes are
-            // derived from the GUID, so recreating gives a different hash for identical content.
-            var group = settings.FindGroup(groupName);
+            // Reuse an existing group to keep its GUID stable — bundle hashes are derived from
+            // the GUID, so recreating gives a different hash for identical content.
+            var group = settings.FindGroup(contentPackageName);
             if (group == null)
             {
                 group = settings.CreateGroup(
-                    groupName,
+                    contentPackageName,
                     setAsDefaultGroup: false,
                     readOnly: false,
                     postEvent: false,
@@ -377,25 +415,52 @@ namespace ContentRepo.Editor
                 schema.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
                 schema.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
                 schema.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
-                log?.Invoke($"[Build] Created temp group '{groupName}'");
+                log?.Invoke($"[Build] Created group '{contentPackageName}'");
             }
             else
             {
-                // Clear previous entries so we get a fresh, accurate set for this build.
-                var oldEntries = new List<AddressableAssetEntry>(group.entries);
-                foreach (var e in oldEntries)
-                    group.RemoveAssetEntry(e, postEvent: false);
-                log?.Invoke($"[Build] Reusing temp group '{groupName}' (stable GUID)");
+                log?.Invoke($"[Build] Reusing group '{contentPackageName}' (stable GUID)");
+            }
+
+            // Ensure the group file lives in _groups/ in the content repo so it can be
+            // committed and sparse-checked-out independently of the package content.
+            // AssetDatabase.MoveAsset preserves the GUID, keeping bundle hashes stable.
+            var targetGroupPath  = $"{groupsFolder}/{contentPackageName}.asset";
+            var currentGroupPath = AssetDatabase.GetAssetPath(group);
+            if (!string.Equals(currentGroupPath.Replace('\\', '/'), targetGroupPath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!AssetDatabase.IsValidFolder(groupsFolder))
+                    AssetDatabase.CreateFolder(repoLocalPath, ContentGitApi.GroupsFolderName);
+
+                var moveError = AssetDatabase.MoveAsset(currentGroupPath, targetGroupPath);
+                if (!string.IsNullOrEmpty(moveError))
+                    log?.Invoke($"[Build] WARNING: Could not move group file to '{targetGroupPath}': {moveError}. " +
+                                "Builds will still work but the file won't benefit from content-repo sparse-checkout.");
+                else
+                    log?.Invoke($"[Build] Group file is at '{targetGroupPath}' (in content repo, commit with other changes).");
             }
 
             var schemaRef = group.GetSchema<BundledAssetGroupSchema>();
             schemaRef.IncludeInBuild = true;
 
-            foreach (var guid in guids)
+            // Sync entries without resetting addresses: remove stale entries (assets deleted from
+            // the folder), add new ones, and leave existing entries untouched so any custom
+            // addresses set by content authors are preserved across builds.
+            var guidSet      = new HashSet<string>(guids, StringComparer.OrdinalIgnoreCase);
+            var existingGuids = new HashSet<string>(group.entries.Select(e => e.guid), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var stale in group.entries.Where(e => !guidSet.Contains(e.guid)).ToList())
+                group.RemoveAssetEntry(stale, postEvent: false);
+
+            var added = 0;
+            foreach (var guid in guids.Where(g => !existingGuids.Contains(g)))
+            {
                 settings.CreateOrMoveEntry(guid, group, readOnly: false, postEvent: false);
+                added++;
+            }
 
             AssetDatabase.SaveAssets();
-            log?.Invoke($"[Build] Populated '{groupName}' with {guids.Length} asset(s) from {contentAssetPath}");
+            log?.Invoke($"[Build] Group '{contentPackageName}': {group.entries.Count} asset(s) ({added} added, {existingGuids.Count - (guidSet.Count - added)} removed) from {contentAssetPath}");
             return group;
         }
 
@@ -408,7 +473,7 @@ namespace ContentRepo.Editor
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
                 if (schema != null) schema.IncludeInBuild = false;
                 AssetDatabase.SaveAssets();
-                log?.Invoke($"[Build] Deactivated temp group '{group.Name}' (IncludeInBuild = false)");
+                log?.Invoke($"[Build] Deactivated group '{group.Name}' (IncludeInBuild = false)");
             }
             catch (Exception ex)
             {
