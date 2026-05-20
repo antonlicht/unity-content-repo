@@ -76,6 +76,10 @@ namespace ContentRepo.Editor
 
             ContentGitApi.OnStateChanged += OnExternalStateChanged;
 
+            // Reset busy state so the initial load is never skipped when the window
+            // is re-enabled after exiting Play mode (no domain reload occurs, so
+            // the busy flag from any in-flight operation while in Play mode persists).
+            busy = false;
             SetSpinnerVisible(false);
             SetStatus("Ready");
             _ = RunAsync("Loading…", () => Task.CompletedTask);
