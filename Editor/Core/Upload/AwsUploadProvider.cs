@@ -2,7 +2,6 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -12,7 +11,6 @@ namespace ContentRepo.Editor
 {
     public sealed class AwsUploadProvider : IContentUploadProvider
     {
-        private static readonly HttpClient Http = new HttpClient();
         private static ContentUploadSettings S => ContentUploadSettings.instance;
 
         public string GetPublicUrl(string remoteKey)
@@ -47,15 +45,23 @@ namespace ContentRepo.Editor
 
         public async Task<string> DownloadTextAsync(string remoteKey)
         {
-            var url = GetPublicUrl(remoteKey);
+            // Read from S3 directly rather than CloudFront so the editor always sees the
+            // authoritative version. CloudFront invalidations can take 30s–2min to propagate,
+            // causing stale manifest reads immediately after upload (wrong UI state) and
+            // read-before-write corruption when two editors upload concurrently.
+            RequireBucket();
+            var s3Uri    = $"s3://{S.S3BucketName}/{remoteKey.TrimStart('/')}";
+            var tempFile = Path.Combine(Path.GetTempPath(), $"content-repo-dl-{Guid.NewGuid():N}");
             try
             {
-                using var resp = await Http.GetAsync(url);
-                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
-                resp.EnsureSuccessStatusCode();
-                return await resp.Content.ReadAsStringAsync();
+                await RunAwsAsync($"s3 cp \"{s3Uri}\" \"{tempFile}\" --region {S.S3Region} --quiet", log: null);
+                return File.Exists(tempFile) ? await Task.Run(() => File.ReadAllText(tempFile)) : null;
             }
-            catch (HttpRequestException) { return null; }
+            catch { return null; }
+            finally
+            {
+                try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { /* best-effort */ }
+            }
         }
 
         public async Task InvalidatePathAsync(string path, UploadLogHandler log = null)

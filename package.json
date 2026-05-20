@@ -1,6 +1,6 @@
 {
   "name": "com.antonlicht.content-repo",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "displayName": "Content Repo",
   "description": "Editor tooling for managing a team content repository via git sparse-checkout, plus an Addressables content build and CDN upload pipeline. Developers check out only the folders they need, build per-content-package Addressables, and publish to a CDN behind a master manifest.",
   "unity": "6000.0",
