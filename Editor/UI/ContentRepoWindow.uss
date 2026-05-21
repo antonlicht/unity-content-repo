@@ -486,3 +486,11 @@
 .cs-file-entry--selected .cs-file-prefix { color: rgb(255, 255, 255); }
 .cs-file-entry--selected .cs-file-name   { color: rgb(255, 255, 255); }
 .cs-file-entry--selected .cs-file-meta-indicator { color: rgb(255, 255, 255); opacity: 0.55; }
+
+/* Local dev override badge — amber/orange to clearly distinguish from deploy badges */
+.cs-badge--local-dev {
+    background-color: rgba(220, 130, 20, 0.28);
+    color: rgb(255, 195, 80);
+    border-width: 1px;
+    border-color: rgba(220, 130, 20, 0.55);
+}
