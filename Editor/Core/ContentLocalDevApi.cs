@@ -144,6 +144,17 @@ namespace ContentRepo.Editor
             log?.Invoke($"[LocalDev] '{packageName}' LocalBundles override cleared.");
         }
 
+        /// <summary>
+        /// Unregisters any local dev override for <paramref name="packageName"/> and
+        /// removes it from the persisted EditorPrefs store so it is not restored on the
+        /// next domain reload.  Use this for automatic cleanup (e.g. folder deleted from disk).
+        /// </summary>
+        public static void ClearOverride(string packageName)
+        {
+            ContentLocalDevOverrides.Unregister(packageName);
+            SaveToPrefs();
+        }
+
         // ── Persistence ───────────────────────────────────────────────────────
 
         internal static void RestoreFromPrefs()
@@ -186,7 +197,7 @@ namespace ContentRepo.Editor
         /// assets from the checked-out content folder. Mirrors the logic in
         /// <see cref="ContentBuildApi.BuildContentPackageAsync"/> without triggering a full build.
         /// </summary>
-        private static AddressableAssetGroup EnsureGroupPopulated(
+        internal static AddressableAssetGroup EnsureGroupPopulated(
             AddressableAssetSettings settings,
             string packageName,
             BuildLogHandler log)
@@ -198,6 +209,10 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException(
                     $"Content repo local path '{repoLocalPath}' must be inside Assets/.");
 
+            // Refresh the AssetDatabase before querying so that assets from a fresh checkout
+            // or newly created package folder are fully imported before we try to enumerate them.
+            AssetDatabase.ImportAsset(contentAssetPath, ImportAssetOptions.ImportRecursive);
+
             if (!AssetDatabase.IsValidFolder(contentAssetPath))
                 throw new InvalidOperationException(
                     $"'{contentAssetPath}' not found in the Asset Database. " +
@@ -208,8 +223,9 @@ namespace ContentRepo.Editor
                 .ToArray();
 
             if (guids.Length == 0)
-                throw new InvalidOperationException(
-                    $"No assets found under '{contentAssetPath}'. Check the folder contains importable assets.");
+                log?.Invoke($"[LocalDev] No assets found under '{contentAssetPath}'. The group will be created empty and populated once assets are added.");
+
+            var groupsFolder = $"{repoLocalPath}/{ContentGitApi.GroupsFolderName}";
 
             var group = settings.FindGroup(packageName);
             if (group == null)
@@ -226,6 +242,24 @@ namespace ContentRepo.Editor
             else
             {
                 log?.Invoke($"[LocalDev] Refreshing Addressables group '{packageName}'.");
+            }
+
+            // Ensure the group file lives in _groups/ in the content repo so it can be
+            // committed and sparse-checked-out independently of the package content.
+            // AssetDatabase.MoveAsset preserves the GUID, keeping bundle hashes stable.
+            var targetGroupPath  = $"{groupsFolder}/{packageName}.asset";
+            var currentGroupPath = AssetDatabase.GetAssetPath(group);
+            if (!string.Equals(currentGroupPath.Replace('\\', '/'), targetGroupPath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!AssetDatabase.IsValidFolder(groupsFolder))
+                    AssetDatabase.CreateFolder(repoLocalPath, ContentGitApi.GroupsFolderName);
+
+                var moveError = AssetDatabase.MoveAsset(currentGroupPath, targetGroupPath);
+                if (!string.IsNullOrEmpty(moveError))
+                    log?.Invoke($"[LocalDev] WARNING: Could not move group file to '{targetGroupPath}': {moveError}. " +
+                                "The group still works but won't benefit from content-repo sparse-checkout.");
+                else
+                    log?.Invoke($"[LocalDev] Group file is at '{targetGroupPath}'.");
             }
 
             // Sync entries: add new assets, remove stale ones, leave existing ones untouched

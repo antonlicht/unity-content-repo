@@ -29,13 +29,16 @@ namespace ContentRepo
                 var manifest = ContentManifest.FromJson(json);
                 if (manifest == null) throw new InvalidDataException($"Manifest at {url} could not be parsed.");
                 SaveCached(environment, generation, json);
+                ContentLocalDevOverrides.InjectIntoManifest(manifest);
                 return manifest;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[ContentRepo] Manifest fetch from {url} failed: {ex.Message}. Falling back to cache.");
-                return LoadCached(environment, generation);
+                var cached = LoadCached(environment, generation);
+                ContentLocalDevOverrides.InjectIntoManifest(cached);
+                return cached;
             }
         }
 
@@ -45,7 +48,9 @@ namespace ContentRepo
             {
                 var path = CachePath(environment, generation);
                 if (!File.Exists(path)) return null;
-                return ContentManifest.FromJson(File.ReadAllText(path));
+                var m = ContentManifest.FromJson(File.ReadAllText(path));
+                ContentLocalDevOverrides.InjectIntoManifest(m);
+                return m;
             }
             catch (Exception ex)
             {

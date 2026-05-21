@@ -9,7 +9,7 @@ namespace ContentRepo.Editor
     [FilePath("ProjectSettings/ContentManifestCodeGen.asset", FilePathAttribute.Location.ProjectFolder)]
     public sealed class ContentManifestCodeGenSettings : ScriptableSingleton<ContentManifestCodeGenSettings>
     {
-        [SerializeField] private string generatedOutputFolder = "Assets/Generated/ContentRepo";
+        [SerializeField] private string generatedOutputFolder = "Assets/Generated";
 
         public string GeneratedOutputFolder
         {
