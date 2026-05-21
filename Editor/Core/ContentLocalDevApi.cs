@@ -175,7 +175,7 @@ namespace ContentRepo.Editor
             }
         }
 
-        private static void SaveToPrefs()
+        internal static void SaveToPrefs()
         {
             var data = new LocalDevSaveData();
             foreach (var kv in ContentLocalDevOverrides.All)

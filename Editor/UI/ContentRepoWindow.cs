@@ -43,6 +43,7 @@ namespace ContentRepo.Editor
         private bool? isInitialized;
         private bool newFolderRowVisible;
         private List<string> remoteFolders = new();
+        private HashSet<string> repoFolders = new(StringComparer.OrdinalIgnoreCase); // folders that exist in the remote git repo
         private List<string> checkedOutFolders = new();
         private Dictionary<string, FolderStatus> folderStatuses = new();
         private readonly Dictionary<string, Action<FolderStatus>> rowUpdaters = new();
@@ -655,6 +656,7 @@ namespace ContentRepo.Editor
         private VisualElement BuildRow(string folder)
         {
             var isCheckedOut = checkedOutFolders.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
+            var isOnRemote   = repoFolders.Contains(folder);
             folderStatuses.TryGetValue(folder, out var status);
             var row = rowTemplate.CloneTree();
 
@@ -676,8 +678,7 @@ namespace ContentRepo.Editor
 
             nameLabel.text = folder;
             renameField.style.display = DisplayStyle.None;
-            checkoutBtn.style.display  = isCheckedOut ? DisplayStyle.None : DisplayStyle.Flex;
-            disconnectBtn.style.display = isCheckedOut ? DisplayStyle.Flex : DisplayStyle.None;
+            checkoutBtn.style.display = isCheckedOut ? DisplayStyle.None : DisplayStyle.Flex;
 
             var expanded = false;
             FolderStatus latestStatus = status;
@@ -815,9 +816,10 @@ namespace ContentRepo.Editor
                 latestStatus = s;
                 ApplyBadgeState(badge, isCheckedOut, s, folder);
                 var dirty = isCheckedOut && !s.IsClean;
-                pullBtn.style.display  = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
-                pushBtn.style.display  = dirty ? DisplayStyle.Flex : DisplayStyle.None;
-                expandBtn.style.display = dirty ? DisplayStyle.Flex : DisplayStyle.None;
+                pullBtn.style.display       = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
+                pushBtn.style.display       = dirty ? DisplayStyle.Flex : DisplayStyle.None;
+                expandBtn.style.display     = dirty ? DisplayStyle.Flex : DisplayStyle.None;
+                disconnectBtn.style.display = isCheckedOut && !dirty && isOnRemote ? DisplayStyle.Flex : DisplayStyle.None;
                 if (!dirty && expanded) { expanded = false; expandBtn.text = "▶"; fileList.style.display = DisplayStyle.None; }
                 if (expanded) RebuildFileList();
             }
@@ -854,8 +856,18 @@ namespace ContentRepo.Editor
             pushBtn.clicked += () => PromptAndCommit();
             moreBtn.clicked += () =>
             {
+                var dirty = isCheckedOut && !latestStatus.IsClean;
                 var menu = new GenericMenu();
                 menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
+                if (dirty && isOnRemote)
+                {
+                    menu.AddSeparator("");
+                    menu.AddItem(new GUIContent("Disconnect"), false, () =>
+                    {
+                        if (EditorUtility.DisplayDialog("Disconnect", $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel"))
+                            _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder));
+                    });
+                }
                 menu.AddSeparator("");
                 menu.AddItem(new GUIContent("Delete from repository"), false, () =>
                 {
@@ -916,10 +928,11 @@ namespace ContentRepo.Editor
         private async Task RefreshDataAsync()
         {
             isInitialized = await ContentGitApi.IsInitializedAsync();
-            remoteFolders.Clear(); checkedOutFolders.Clear(); folderStatuses.Clear();
+            remoteFolders.Clear(); repoFolders.Clear(); checkedOutFolders.Clear(); folderStatuses.Clear();
             if (isInitialized != true) return;
 
             try { remoteFolders = await ContentGitApi.GetRemoteFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Remote folders: {ex.Message}"); }
+            repoFolders = new HashSet<string>(remoteFolders, StringComparer.OrdinalIgnoreCase);
             try { checkedOutFolders = await ContentGitApi.GetCheckedOutFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Checked-out folders: {ex.Message}"); }
 
             // Also include any folder the developer created directly on disk (via Unity Project

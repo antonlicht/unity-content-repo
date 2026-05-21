@@ -115,6 +115,9 @@ namespace ContentRepo.Editor
             if (anyChange)
                 AssetDatabase.SaveAssets();
 
+            if (anyLocalPackage)
+                ContentLocalDevApi.SaveToPrefs();
+
             // Switch Play Mode Script to match the dominant local-dev mode.
             // If any package uses LocalBundles we stay on "Use Existing Build" (2);
             // otherwise switch to "Use Asset Database (fastest)" (0).
