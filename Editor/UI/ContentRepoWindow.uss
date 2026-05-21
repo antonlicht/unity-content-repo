@@ -179,6 +179,16 @@
     -unity-background-scale-mode: scale-to-fit;
 }
 
+/* Icon inside a ToolbarButton — fills the button's content area automatically,
+   so it scales with the toolbar height instead of using a fixed pixel size. */
+.cs-toolbar-icon {
+    flex-grow: 1;
+    align-self: stretch;
+    margin-top: 2px;
+    margin-bottom: 2px;
+    -unity-background-scale-mode: scale-to-fit;
+}
+
 .cs-rename-field {
     min-width: 80px;
     max-width: 200px;

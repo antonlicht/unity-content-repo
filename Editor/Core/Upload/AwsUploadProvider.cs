@@ -116,7 +116,7 @@ namespace ContentRepo.Editor
             };
 
             var cmd = $"aws {args}";
-            Debug.Log($"[ContentRepo] > {cmd}");
+            if (log != null) Debug.Log($"[ContentRepo] > {cmd}");
             log?.Invoke($"> {cmd}");
 
             return Task.Run(() =>
