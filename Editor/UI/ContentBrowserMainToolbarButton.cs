@@ -7,7 +7,7 @@ namespace ContentRepo.Editor
     internal static class ContentBrowserMainToolbarButton
     {
         [MainToolbarElement("Content Repo/Content Browser",
-            defaultDockPosition = MainToolbarDockPosition.Left)]
+            defaultDockPosition = MainToolbarDockPosition.Right)]
         public static MainToolbarElement CreateButton()
         {
             var icon    = AssetDatabase.LoadAssetAtPath<Texture2D>(
