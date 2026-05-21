@@ -132,6 +132,7 @@ namespace ContentRepo.Editor
             uploadAllBtn        = Q<Button>("btn-upload-all");
             Q<Image>("img-upload-all").image = LoadIcon("cloud-upload");
             promoteAllBtn = Q<Button>("btn-promote-all");
+            Q<Image>("img-promote-all").image = LoadIcon("rocket");
             moreAllMenu   = Q<ToolbarMenu>("btn-more-all");
 
             // New-folder row
@@ -442,6 +443,18 @@ namespace ContentRepo.Editor
             row.AddToClassList("cs-pipeline-row");
             row.AddToClassList("cs-pipeline-row--remote");
 
+            if (repoFolders.Contains(pkg))
+            {
+                var checkoutBtn = new Button(() => _ = RunAsync($"Checking out '{pkg}'…", () => ContentGitApi.CheckOutFolderAsync(pkg)));
+                checkoutBtn.AddToClassList("cs-icon-btn");
+                checkoutBtn.AddToClassList("cs-icon-btn--muted");
+                checkoutBtn.tooltip = $"Check out '{pkg}'";
+                var checkoutImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("folder-down") };
+                checkoutImg.AddToClassList("cs-icon-image");
+                checkoutBtn.Add(checkoutImg);
+                row.Add(checkoutBtn);
+            }
+
             var nameLabel = new Label(pkg);
             nameLabel.AddToClassList("cs-pipeline-name");
             row.Add(nameLabel);
@@ -473,9 +486,6 @@ namespace ContentRepo.Editor
             moreBtn.clicked += () =>
             {
                 var menu = new GenericMenu();
-                if (repoFolders.Contains(pkg))
-                    menu.AddItem(new GUIContent("Check out"), false,
-                        () => _ = RunAsync($"Checking out '{pkg}'…", () => ContentGitApi.CheckOutFolderAsync(pkg)));
                 if (prdId != null && prdId != stgId)
                     menu.AddItem(new GUIContent("Restore from production"), false, () =>
                         _ = RunPipelineAsync($"Restoring '{pkg}'…",
@@ -773,7 +783,9 @@ namespace ContentRepo.Editor
                 menu.DropDown(moreBtn.worldBound);
             };
 
-            // ── Integrated deploy buttons (inserted before ⋮) ─────────────────
+            // ── Integrated deploy buttons (inserted before ⋮, reverse-order due to Insert semantics) ──
+            // Desired visual order: commit(pushBtn) | build | upload | promote | deployStatus | ⋮
+            // Each Insert(moreBtnIndex) prepends, so insert last-visible item first.
             var rowBody      = row.Q<VisualElement>("row-body");
             var moreBtnIndex = rowBody.IndexOf(moreBtn);
 
@@ -781,7 +793,43 @@ namespace ContentRepo.Editor
             deployStatus.AddToClassList("cs-pipeline-status");
             deployStatus.AddToClassList("cs-pipeline-status--idle");
             deployStatus.style.display = DisplayStyle.None;
-            rowBody.Insert(moreBtnIndex, deployStatus);
+            rowBody.Insert(moreBtnIndex, deployStatus);   // inserted 1st → ends up rightmost
+
+            var staging2    = ContentUploadSettings.instance.StagingPrefix;
+            var production2 = ContentUploadSettings.instance.ProductionPrefix;
+            var promoteBtn = new Button(() =>
+            {
+                if (!EditorUtility.DisplayDialog("Promote",
+                    $"Promote '{folder}' from {staging2} → {production2}?", "Promote", "Cancel")) return;
+                _ = RunPipelineAsync($"Promoting '{folder}'…",
+                    async () => { await ContentUploadApi.PromoteContentPackageAsync(folder, staging2, production2, AppendDeployLog); await RefreshManifestsAsync(); },
+                    deployLog);
+            });
+            promoteBtn.AddToClassList("cs-icon-btn");
+            promoteBtn.AddToClassList("cs-icon-btn--lg");
+            promoteBtn.tooltip = $"Promote '{folder}' to production";
+            promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
+            var promoteImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("rocket") };
+            promoteImg.AddToClassList("cs-icon-image");
+            promoteBtn.Add(promoteImg);
+            rowBody.Insert(moreBtnIndex, promoteBtn);     // inserted 2nd → ends up left of deployStatus
+
+            var uploadBtn = new Button(() => _ = RunPipelineAsync($"Uploading '{folder}'…",
+                async () =>
+                {
+                    SetPipelineStatus(deployStatus, "running");
+                    try   { await ContentUploadApi.UploadContentPackageAsync(folder, StagingKey(), log: AppendDeployLog); SetPipelineStatus(deployStatus, "ok"); }
+                    catch { SetPipelineStatus(deployStatus, "err"); throw; }
+                    finally { await RefreshManifestsAsync(); }
+                }, deployLog));
+            uploadBtn.AddToClassList("cs-icon-btn");
+            uploadBtn.AddToClassList("cs-icon-btn--lg");
+            uploadBtn.tooltip       = $"Upload '{folder}' to staging\n{localBuildId}";
+            uploadBtn.style.display = localBuildId != null && localBuildId != stgId ? DisplayStyle.Flex : DisplayStyle.None;
+            var uploadImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("cloud-upload") };
+            uploadImg.AddToClassList("cs-icon-image");
+            uploadBtn.Add(uploadImg);
+            rowBody.Insert(moreBtnIndex, uploadBtn);      // inserted 3rd → ends up left of promote
 
             var buildBtn = new Button(() => _ = RunPipelineAsync($"Building '{folder}'…",
                 async () =>
@@ -796,39 +844,7 @@ namespace ContentRepo.Editor
             var buildImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("hammer") };
             buildImg.AddToClassList("cs-icon-image");
             buildBtn.Add(buildImg);
-            rowBody.Insert(moreBtnIndex, buildBtn);
-
-            var uploadBtn = new Button(() => _ = RunPipelineAsync($"Uploading '{folder}'…",
-                async () =>
-                {
-                    SetPipelineStatus(deployStatus, "running");
-                    try   { await ContentUploadApi.UploadContentPackageAsync(folder, StagingKey(), log: AppendDeployLog); SetPipelineStatus(deployStatus, "ok"); }
-                    catch { SetPipelineStatus(deployStatus, "err"); throw; }
-                    finally { await RefreshManifestsAsync(); }
-                }, deployLog));
-            uploadBtn.AddToClassList("cs-icon-btn");
-            uploadBtn.AddToClassList("cs-icon-btn--lg");
-            uploadBtn.tooltip      = $"Upload '{folder}' to staging";
-            uploadBtn.style.display = localBuildId != null && localBuildId != stgId ? DisplayStyle.Flex : DisplayStyle.None;
-            var uploadImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("cloud-upload") };
-            uploadImg.AddToClassList("cs-icon-image");
-            uploadBtn.Add(uploadImg);
-            rowBody.Insert(moreBtnIndex, uploadBtn);
-
-            var staging2    = ContentUploadSettings.instance.StagingPrefix;
-            var production2 = ContentUploadSettings.instance.ProductionPrefix;
-            var promoteBtn  = new Button(() =>
-            {
-                if (!EditorUtility.DisplayDialog("Promote",
-                    $"Promote '{folder}' from {staging2} → {production2}?", "Promote", "Cancel")) return;
-                _ = RunPipelineAsync($"Promoting '{folder}'…",
-                    async () => { await ContentUploadApi.PromoteContentPackageAsync(folder, staging2, production2, AppendDeployLog); await RefreshManifestsAsync(); },
-                    deployLog);
-            }) { text = "→ prod" };
-            promoteBtn.AddToClassList("cs-text-btn");
-            promoteBtn.AddToClassList("cs-promote-btn");
-            promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
-            rowBody.Insert(moreBtnIndex, promoteBtn);
+            rowBody.Insert(moreBtnIndex, buildBtn);       // inserted 4th → ends up leftmost (after pushBtn)
 
             return row;
         }
