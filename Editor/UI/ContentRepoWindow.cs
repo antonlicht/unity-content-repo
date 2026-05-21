@@ -1139,11 +1139,18 @@ namespace ContentRepo.Editor
             var addressableSettings = UnityEditor.AddressableAssets.AddressableAssetSettingsDefaultObject.Settings;
             if (addressableSettings == null) return;
 
+            // DefaultGroup throws when Addressables hasn't been fully initialized (fresh project,
+            // no default group configured). Resolve it once with a safe fallback so per-group
+            // IsDefaultGroup() calls don't blow up the whole cleanup.
+            UnityEditor.AddressableAssets.Settings.AddressableAssetGroup defaultGroup = null;
+            try { defaultGroup = addressableSettings.DefaultGroup; }
+            catch { /* no default group configured yet */ }
+
             var known = new HashSet<string>(remoteFolders.Concat(diskFolders), StringComparer.OrdinalIgnoreCase);
             var groupsFolderSegment = $"/{ContentGitApi.GroupsFolderName}/";
 
             var toRemove = addressableSettings.groups
-                .Where(g => g != null && !g.IsDefaultGroup() && !known.Contains(g.name))
+                .Where(g => g != null && g != defaultGroup && !known.Contains(g.name))
                 .ToList();
 
             foreach (var group in toRemove)
@@ -1158,7 +1165,7 @@ namespace ContentRepo.Editor
             var anyStale = false;
             foreach (var group in addressableSettings.groups.ToList())
             {
-                if (group == null || group.IsDefaultGroup()) continue;
+                if (group == null || group == defaultGroup) continue;
                 var assetPath2 = AssetDatabase.GetAssetPath(group);
                 if (string.IsNullOrEmpty(assetPath2)) continue;
                 if (!assetPath2.Replace('\\', '/').Contains(groupsFolderSegment)) continue;

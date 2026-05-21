@@ -659,6 +659,11 @@ namespace ContentRepo.Editor
 
                 await ClearSkipWorktreeAsync(folder);
                 await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
+                foreach (var relPath in GetGroupRelativePaths(folder))
+                {
+                    try { await RunGitCommandAsync($"rm -f -- {Quote(relPath)}", ContentAbsolutePath); }
+                    catch { /* group file may not be committed — fine */ }
+                }
                 await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
                 await TryRemoteAsync("push", () => RunGitCommandAsync(
                     $"push origin HEAD:{Quote(branch)}",
