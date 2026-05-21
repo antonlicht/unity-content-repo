@@ -29,7 +29,7 @@ namespace ContentRepo.Editor
         public List<FileChange> Files;
 
         public bool IsClean => Staged == 0 && Modified == 0 && Deleted == 0 && Untracked == 0;
-
+        
         public override string ToString()
         {
             if (IsClean) return "clean";
@@ -325,8 +325,37 @@ namespace ContentRepo.Editor
                 $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
                 ContentAbsolutePath));
 
+            // Restore the Addressables group asset for this package from the committed state
+            // in _groups/. When the package is not checked out, Unity removes entries whose
+            // asset GUIDs are missing from disk. Re-checking out the group file recovers the
+            // original entries — including any custom addresses set by content authors.
+            await TryRemoteAsync("group restore", () => RestoreGroupAssetAsync(folder));
+
             NotifyChange();
             AssetDatabase.Refresh();
+        }
+
+        private static async Task RestoreGroupAssetAsync(string folder)
+        {
+            var groupRelPath     = $"{GroupsFolderName}/{folder}.asset";
+            var groupMetaRelPath = $"{GroupsFolderName}/{folder}.asset.meta";
+
+            // git checkout HEAD -- <path> restores the file to the last committed state.
+            // Silently ignore paths that don't exist in HEAD yet (e.g. first-ever checkout
+            // before any build has committed the group file).
+            foreach (var relPath in new[] { groupRelPath, groupMetaRelPath })
+            {
+                try
+                {
+                    await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath);
+                }
+                catch (InvalidOperationException ex)
+                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
+                {
+                    // File not yet committed — no group to restore; that's fine.
+                    Debug.LogWarning($"[ContentRepo] No committed group asset found for '{folder}' in {GroupsFolderName}/; skipping group restore.");
+                }
+            }
         }
 
         public static async Task DisconnectFolderAsync(string folder)
