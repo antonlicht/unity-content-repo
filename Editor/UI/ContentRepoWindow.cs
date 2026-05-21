@@ -466,9 +466,37 @@ namespace ContentRepo.Editor
                 row.Add(checkoutBtn);
             }
 
-            var nameLabel = new Label(pkg);
+            var nameLabel   = new Label(pkg);
             nameLabel.AddToClassList("cs-pipeline-name");
             row.Add(nameLabel);
+
+            var renameField = new TextField { style = { display = DisplayStyle.None, flexGrow = 1 } };
+            renameField.AddToClassList("cs-folder-name");
+            renameField.AddToClassList("cs-rename-field");
+            row.Add(renameField);
+
+            void EnterRenameMode()
+            {
+                renameField.SetValueWithoutNotify(pkg);
+                nameLabel.style.display   = DisplayStyle.None;
+                renameField.style.display = DisplayStyle.Flex;
+                renameField.Focus();
+                renameField.SelectAll();
+            }
+            void ExitRenameMode(bool commit)
+            {
+                nameLabel.style.display   = DisplayStyle.Flex;
+                renameField.style.display = DisplayStyle.None;
+                if (!commit) return;
+                var n = renameField.value?.Trim();
+                if (!string.IsNullOrEmpty(n) && n != pkg)
+                    _ = RunAsync($"Renaming '{pkg}'…", () => ContentGitApi.RenameFolderAsync(pkg, n));
+            }
+            renameField.RegisterCallback<KeyDownEvent>(evt =>
+            {
+                if      (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter) { evt.StopPropagation(); ExitRenameMode(true);  }
+                else if (evt.keyCode == KeyCode.Escape)                                       { evt.StopPropagation(); ExitRenameMode(false); }
+            });
 
             var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
             var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
@@ -518,6 +546,8 @@ namespace ContentRepo.Editor
             moreBtn.clicked += () =>
             {
                 var menu = new GenericMenu();
+                if (repoFolders.Contains(pkg))
+                    menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
                 if (prdId != null && prdId != stgId)
                     menu.AddItem(new GUIContent("Restore from production"), false, () =>
                         _ = RunPipelineAsync($"Restoring '{pkg}'…",
@@ -790,7 +820,7 @@ namespace ContentRepo.Editor
             {
                 var dirty = isCheckedOut && !latestStatus.IsClean;
                 var menu  = new GenericMenu();
-                menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
+                menu.AddItem(new GUIContent("Rename Package"), false, () => EnterRenameMode());
                 if (dirty && isOnRemote)
                 {
                     menu.AddItem(new GUIContent("Disconnect"), false, () =>

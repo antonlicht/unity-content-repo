@@ -574,7 +574,7 @@ namespace ContentRepo.Editor
         {
             if (string.IsNullOrWhiteSpace(name))
                 throw new ArgumentException("Content package name cannot be empty.", nameof(name));
-            if (name.IndexOfAny(new[] { '/', '\\', '\n', '\r', '\0', '"', ' ' }) >= 0)
+            if (name.IndexOfAny(new[] { '/', '\\', '\n', '\r', '\0', '"' }) >= 0)
                 throw new ArgumentException("Invalid content package name.", nameof(name));
         }
     }

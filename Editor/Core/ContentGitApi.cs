@@ -422,13 +422,34 @@ namespace ContentRepo.Editor
             if (Directory.Exists(localFolder))
                 throw new InvalidOperationException($"A folder named '{folder}' already exists in the content repository.");
 
-            await Task.Run(() =>
-            {
-                Directory.CreateDirectory(localFolder);
-                File.WriteAllText(Path.Combine(localFolder, ".gitkeep"), "");
-            });
-
             await EnsureSparseCheckoutAsync();
+
+            // If this folder exists in local HEAD (e.g. from a prior creation whose deletion was
+            // never pushed), `sparse-checkout add` below would restore those old files from HEAD.
+            // Detect that and commit a local deletion first so the folder starts truly empty.
+            var inLocalHead = !string.IsNullOrWhiteSpace(
+                await RunGitCommandAsync($"ls-tree -d HEAD -- {Quote(folder)}", ContentAbsolutePath, silent: true));
+            if (inLocalHead)
+            {
+                Debug.Log($"[ContentRepo] '{folder}' still exists in local HEAD from a prior creation — committing its removal before recreating.");
+                // Add to sparse-checkout so git checks out the stale files, then delete them.
+                await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+                await ClearSkipWorktreeAsync(folder);
+                await RunGitCommandAsync($"rm -rf --ignore-unmatch -- {Quote(folder)}", ContentAbsolutePath);
+                foreach (var relPath in GetGroupRelativePaths(folder))
+                    try { await RunGitCommandAsync($"rm -f --ignore-unmatch -- {Quote(relPath)}", ContentAbsolutePath); } catch { }
+                // Only commit if something was actually staged (rm --ignore-unmatch may stage nothing).
+                var staged = await RunGitCommandAsync("diff --cached --name-only", ContentAbsolutePath, silent: true);
+                if (!string.IsNullOrWhiteSpace(staged))
+                    await RunGitCommandAsync($"commit -m {Quote($"Remove stale {folder}")}", ContentAbsolutePath);
+            }
+
+            // Also clear any staged-but-uncommitted index entries so they can't be restored.
+            await ClearSkipWorktreeAsync(folder);
+            try { await RunGitCommandAsync($"rm -rf --cached -- {Quote(folder)}", ContentAbsolutePath); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec")) { }
+
+            await Task.Run(() => Directory.CreateDirectory(localFolder));
             await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
 
             NotifyChange();
@@ -552,14 +573,14 @@ namespace ContentRepo.Editor
             // Stage package content normally.
             await RunGitCommandAsync($"add -- {Quote(folder)}", ContentAbsolutePath);
 
-            // Stage the Addressable group file with --sparse: _groups/ files are created by the
-            // build and may not yet be part of the sparse-checkout worktree definition, so a plain
-            // git add would refuse them. --sparse stages them without expanding the worktree.
-            var groupFile = $"{GroupsFolderName}/{folder}.asset";
-            var groupMeta = groupFile + ".meta";
-            await RunGitCommandAsync(
-                $"add --sparse -- {Quote(groupFile)} {Quote(groupMeta)}",
-                ContentAbsolutePath);
+            // Stage the Addressable group asset and any schema files with --sparse: files in _groups/
+            // may not be part of the sparse-checkout worktree definition, so a plain git add refuses them.
+            // Enumerate all matching files on disk so schemas are included if Unity writes them separately.
+            var groupFiles = GetGroupRelativePaths(folder).ToList();
+            if (groupFiles.Count > 0)
+                await RunGitCommandAsync(
+                    $"add --sparse -- {string.Join(" ", groupFiles.Select(Quote))}",
+                    ContentAbsolutePath);
 
             var statusOut = await RunGitCommandAsync("diff --cached --name-only", ContentAbsolutePath);
             if (string.IsNullOrWhiteSpace(statusOut))
@@ -624,6 +645,8 @@ namespace ContentRepo.Editor
             var remoteFolders = await GetRemoteFoldersAsync();
             var isOnRemote    = remoteFolders.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
 
+            Debug.Log($"[ContentRepo] DeleteRemoteFolderAsync '{folder}': isOnRemote={isOnRemote}");
+
             if (isOnRemote)
             {
                 // Folder is committed on the remote: check it out if needed, then git rm + commit + push.
@@ -634,7 +657,8 @@ namespace ContentRepo.Editor
                     await RunGitCommandAsync($"pull origin {Quote(branch)}", ContentAbsolutePath);
                 }
 
-                await RunGitCommandAsync($"rm -r -- {Quote(folder)}", ContentAbsolutePath);
+                await ClearSkipWorktreeAsync(folder);
+                await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
                 await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
                 await TryRemoteAsync("push", () => RunGitCommandAsync(
                     $"push origin HEAD:{Quote(branch)}",
@@ -642,16 +666,55 @@ namespace ContentRepo.Editor
             }
             else
             {
-                // Folder is local-only (never committed / pushed). No git rm needed.
-                // 1. Unstage anything that was staged for this folder.
-                try { await RunGitCommandAsync($"rm -r --cached -- {Quote(folder)}", ContentAbsolutePath); }
-                catch (InvalidOperationException ex)
-                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
+                // Folder is not on remote, but it may have been committed locally (never pushed).
+                // If files exist in local HEAD, a plain --cached unstage would leave HEAD intact,
+                // causing sparse-checkout to restore them the next time the folder is re-created.
+                // Detect that case and commit the deletion locally (no push needed).
+                var inLocalHead = !string.IsNullOrWhiteSpace(
+                    await RunGitCommandAsync($"ls-tree -d HEAD -- {Quote(folder)}", ContentAbsolutePath, silent: true));
+
+                Debug.Log($"[ContentRepo] DeleteRemoteFolderAsync '{folder}': inLocalHead={inLocalHead}");
+
+                if (inLocalHead)
                 {
-                    // Nothing was staged — that's fine.
+                    // Ensure the folder is checked out so git rm can see the files.
+                    var checkedOut = await IsFolderCheckedOutAsync(folder);
+                    if (!checkedOut)
+                    {
+                        await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+                        await RunGitCommandAsync($"pull origin {Quote(branch)}", ContentAbsolutePath);
+                    }
+
+                    // Clear skip-worktree bits so git rm can process sparse-checkout-excluded files.
+                    await ClearSkipWorktreeAsync(folder);
+
+                    // git rm removes files from both index and working tree, then we commit locally.
+                    await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
+                    foreach (var relPath in GetGroupRelativePaths(folder))
+                    {
+                        try { await RunGitCommandAsync($"rm -f -- {Quote(relPath)}", ContentAbsolutePath); }
+                        catch { /* group file may not be committed — fine */ }
+                    }
+                    await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
+                    // No push — the branch diverges from remote but the folder content is gone from HEAD.
+                }
+                else
+                {
+                    // Files were only staged (never committed). Clear skip-worktree bits first
+                    // so git rm --cached can process sparse-checkout-excluded files.
+                    await ClearSkipWorktreeAsync(folder);
+
+                    // Force-remove from index.
+                    foreach (var path in new[] { folder }.Concat(GetGroupRelativePaths(folder)))
+                    {
+                        try { await RunGitCommandAsync($"rm -rf --cached -- {Quote(path)}", ContentAbsolutePath); }
+                        catch (InvalidOperationException ex)
+                            when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
+                        { /* nothing staged for this path — fine */ }
+                    }
                 }
 
-                // 2. Remove the folder from sparse-checkout so it won't be re-pulled.
+                // Remove the folder from sparse-checkout so it won't be re-pulled.
                 try
                 {
                     var current = await GetCheckedOutFoldersAsync();
@@ -666,14 +729,26 @@ namespace ContentRepo.Editor
                     Debug.LogWarning($"[ContentRepo] Could not update sparse-checkout while deleting '{folder}': {ex.Message}");
                 }
 
-                // 3. Delete the local folder and its .meta from disk.
-                var localFolder = Path.Combine(ContentAbsolutePath, folder);
-                if (Directory.Exists(localFolder))
+                // Use git clean to remove any remaining untracked files from disk.
+                // This covers: files never staged (invisible to git rm --cached), files
+                // that git rm --cached removed from the index (making them untracked),
+                // and files that System.IO couldn't delete due to Unity file locks.
+                try { await RunGitCommandAsync($"clean -fdx -- {Quote(folder)}", ContentAbsolutePath); }
+                catch (Exception ex) { Debug.LogWarning($"[ContentRepo] git clean failed for '{folder}': {ex.Message}"); }
+
+                // Also clean up group files for this folder.
+                foreach (var relPath in GetGroupRelativePaths(folder))
                 {
-                    try { Directory.Delete(localFolder, true); }
-                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete local folder '{localFolder}': {ex.Message}"); }
+                    var absPath = Path.Combine(ContentAbsolutePath, relPath);
+                    if (File.Exists(absPath))
+                    {
+                        try { File.Delete(absPath); }
+                        catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete group file '{absPath}': {ex.Message}"); }
+                    }
                 }
-                var meta = localFolder + ".meta";
+
+                // Remove the .meta sidecar for the folder itself.
+                var meta = Path.Combine(ContentAbsolutePath, folder) + ".meta";
                 if (File.Exists(meta))
                 {
                     try { File.Delete(meta); }
@@ -790,6 +865,47 @@ namespace ContentRepo.Editor
             catch
             {
                 await RunGitCommandAsync("sparse-checkout init --cone", ContentAbsolutePath);
+            }
+        }
+
+        // Clears the sparse-checkout skip-worktree bit on all indexed files under `folderOrPath`
+        // so that subsequent git rm / git rm --cached commands can process them.
+        private static async Task ClearSkipWorktreeAsync(string folderOrPath)
+        {
+            try
+            {
+                var output = await RunGitCommandAsync(
+                    $"ls-files -- {Quote(folderOrPath)}", ContentAbsolutePath, silent: true);
+                if (string.IsNullOrWhiteSpace(output)) return;
+                var files = output
+                    .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(f => f.Trim())
+                    .Where(f => !string.IsNullOrEmpty(f))
+                    .ToList();
+                if (files.Count > 0)
+                    await RunGitCommandAsync(
+                        $"update-index --no-skip-worktree -- {string.Join(" ", files.Select(Quote))}",
+                        ContentAbsolutePath);
+            }
+            catch { /* best-effort — if this fails, the rm may still succeed */ }
+        }
+
+        // Returns repo-relative paths for all group + schema files that belong to `folder` and exist on disk.
+        // Matches "<folder>.asset", "<folder>.asset.meta", and any "<folder>_schema_*" variants.
+        private static IEnumerable<string> GetGroupRelativePaths(string folder)
+        {
+            var groupsDir = Path.Combine(ContentAbsolutePath, GroupsFolderName);
+            if (!Directory.Exists(groupsDir)) yield break;
+
+            var exactPrefix  = folder + ".";          // <folder>.asset  / <folder>.asset.meta
+            var schemaPrefix = folder + "_schema_";   // <folder>_schema_*.asset (if Unity writes them separately)
+
+            foreach (var absPath in Directory.GetFiles(groupsDir))
+            {
+                var name = Path.GetFileName(absPath);
+                if (name.StartsWith(exactPrefix,  StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith(schemaPrefix, StringComparison.OrdinalIgnoreCase))
+                    yield return $"{GroupsFolderName}/{name}";
             }
         }
 
