@@ -23,7 +23,9 @@
             <editor:ToolbarButton name="btn-upload-all" tooltip="Upload all to staging">
                 <ui:Image name="img-upload-all" class="cs-toolbar-icon" picking-mode="Ignore" />
             </editor:ToolbarButton>
-            <editor:ToolbarButton name="btn-promote-all" text="Promote all → production" class="cs-promote-btn" />
+            <editor:ToolbarButton name="btn-promote-all" tooltip="Promote all → production">
+                <ui:Image name="img-promote-all" class="cs-toolbar-icon" picking-mode="Ignore" />
+            </editor:ToolbarButton>
             <editor:ToolbarMenu   name="btn-more-all" tooltip="More actions" />
         </editor:Toolbar>
 
