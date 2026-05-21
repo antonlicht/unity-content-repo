@@ -170,6 +170,8 @@ The process exits `0` on success and `1` on failure.
 5. Set those groups' **BundledAssetGroupSchema** build and load paths to the **Remote** profile variables (`RemoteBuildPath` / `RemoteLoadPath`).
 6. Build and upload from the **Deploy** tab as usual.
 
+> The first build creates `_groups/Episode02.asset` inside the content repo. Commit and push this file — it stores the group's stable GUID and custom addresses, and is restored automatically when any developer checks out the package.
+
 ---
 
 ## Loading content at runtime
@@ -219,6 +221,7 @@ Call `ContentRepoRuntime.RefreshAsync(baseUrl, environment)` to re-fetch the man
 - **Local Dev: `No catalog JSON found in '…'`** — enable **Build Remote Catalog** in the Addressables settings for this package.
 - **Local Dev: assets not updating after re-running Fast Mode** — click **Refresh** in the Addressables Groups window, then re-enter Play Mode.
 - **Local Dev: badge missing after domain reload** — open `⋮ > Local Dev` and re-register the override.
+- **Addressables group is empty after checkout** — the group asset was restored from `_groups/` automatically when you checked out the package. If it still appears empty, the group file may not have been committed to the content repo yet; run the first build and push `_groups/<packageName>.asset`.
 - **CloudFront `TooManyInvalidationsInProgress`** — free quota is 1 000 paths/month. Batch uploads or wait for the previous invalidation to complete.
 - **CDN serves stale content after upload** — the Upload action invalidates `/<env>/manifest.json` automatically. If you pushed manually, run `aws cloudfront create-invalidation` yourself.
 - **Runtime: `Manifest fetch failed … Falling back to cache`** — the app booted offline from a cached manifest. Fix CDN connectivity or certificate issues on the device.
