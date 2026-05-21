@@ -413,11 +413,6 @@
     color: rgb(90, 150, 240);
 }
 
-.cs-badge--promote {
-    background-color: rgba(220, 160, 30, 0.2);
-    color: rgb(230, 170, 40);
-}
-
 .cs-promote-btn {
     color: rgb(90, 150, 240);
 }
