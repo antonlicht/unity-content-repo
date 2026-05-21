@@ -183,6 +183,33 @@ namespace ContentRepo.Editor
             }
         }
 
+        /// <summary>
+        /// Returns the names of all direct subfolders of <see cref="ContentAbsolutePath"/>
+        /// that exist on disk right now — regardless of whether they are on the remote or in
+        /// the sparse-checkout list.  The <c>_groups</c> system folder and any hidden folders
+        /// (starting with '.') are excluded.
+        /// </summary>
+        public static Task<List<string>> GetLocalFoldersOnDiskAsync()
+        {
+            return Task.Run(() =>
+            {
+                var root = ContentAbsolutePath;
+                if (!Directory.Exists(root)) return new List<string>();
+
+                var folders = new List<string>();
+                foreach (var dir in Directory.GetDirectories(root))
+                {
+                    var name = Path.GetFileName(dir);
+                    if (string.IsNullOrEmpty(name)) continue;
+                    if (name.StartsWith(".")) continue;
+                    if (name.Equals(GroupsFolderName, StringComparison.OrdinalIgnoreCase)) continue;
+                    folders.Add(name);
+                }
+                folders.Sort(StringComparer.OrdinalIgnoreCase);
+                return folders;
+            });
+        }
+
         public static async Task<List<string>> GetRemoteFoldersAsync()
         {
             var path = ContentAbsolutePath;
@@ -403,11 +430,6 @@ namespace ContentRepo.Editor
 
             await EnsureSparseCheckoutAsync();
             await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
-            await RunGitCommandAsync($"add -- {Quote(folder)}", ContentAbsolutePath);
-            await RunGitCommandAsync($"commit -m {Quote("Add " + folder)}", ContentAbsolutePath);
-            await TryRemoteAsync("push", () => RunGitCommandAsync(
-                $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath));
 
             NotifyChange();
             AssetDatabase.Refresh();
@@ -469,6 +491,38 @@ namespace ContentRepo.Editor
 
             NotifyChange();
             AssetDatabase.Refresh();
+        }
+
+        /// <summary>
+        /// Adds <paramref name="folder"/> to the sparse-checkout list if it is not already present.
+        /// Safe to call for folders that are already checked out — it is a no-op in that case.
+        /// </summary>
+        public static async Task EnsureFolderInSparseCheckoutAsync(string folder)
+        {
+            var current = await GetCheckedOutFoldersAsync();
+            if (current.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase)))
+                return; // already in sparse-checkout
+
+            await EnsureSparseCheckoutAsync();
+            await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+        }
+
+        /// <summary>
+        /// Removes <paramref name="folder"/> from the sparse-checkout list if it is present.
+        /// Used to prune stale entries for folders that are no longer on the remote or on disk.
+        /// Always keeps <c>_groups</c> in the list.
+        /// </summary>
+        public static async Task RemoveFolderFromSparseCheckoutAsync(string folder)
+        {
+            var current = await GetCheckedOutFoldersAsync();
+            if (!current.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase)))
+                return; // already absent — nothing to do
+
+            var remaining = current
+                .Where(f => !f.Equals(folder, StringComparison.OrdinalIgnoreCase))
+                .Prepend(GroupsFolderName)
+                .Select(Quote);
+            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", remaining)}", ContentAbsolutePath);
         }
 
         public static async Task<bool> IsFolderCheckedOutAsync(string folder)
@@ -566,22 +620,68 @@ namespace ContentRepo.Editor
         {
             ValidateFolderName(folder);
 
-            var checkedOut = await IsFolderCheckedOutAsync(folder);
-            if (!checkedOut)
-            {
-                await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
-                await RunGitCommandAsync(
-                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                    ContentAbsolutePath);
-            }
+            var branch        = ContentRepoSettings.instance.Branch;
+            var remoteFolders = await GetRemoteFoldersAsync();
+            var isOnRemote    = remoteFolders.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
 
-            await RunGitCommandAsync($"rm -r -- {Quote(folder)}", ContentAbsolutePath);
-            await RunGitCommandAsync(
-                $"commit -m {Quote("Remove " + folder)}",
-                ContentAbsolutePath);
-            await TryRemoteAsync("push", () => RunGitCommandAsync(
-                $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath));
+            if (isOnRemote)
+            {
+                // Folder is committed on the remote: check it out if needed, then git rm + commit + push.
+                var checkedOut = await IsFolderCheckedOutAsync(folder);
+                if (!checkedOut)
+                {
+                    await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+                    await RunGitCommandAsync($"pull origin {Quote(branch)}", ContentAbsolutePath);
+                }
+
+                await RunGitCommandAsync($"rm -r -- {Quote(folder)}", ContentAbsolutePath);
+                await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
+                await TryRemoteAsync("push", () => RunGitCommandAsync(
+                    $"push origin HEAD:{Quote(branch)}",
+                    ContentAbsolutePath));
+            }
+            else
+            {
+                // Folder is local-only (never committed / pushed). No git rm needed.
+                // 1. Unstage anything that was staged for this folder.
+                try { await RunGitCommandAsync($"rm -r --cached -- {Quote(folder)}", ContentAbsolutePath); }
+                catch (InvalidOperationException ex)
+                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
+                {
+                    // Nothing was staged — that's fine.
+                }
+
+                // 2. Remove the folder from sparse-checkout so it won't be re-pulled.
+                try
+                {
+                    var current = await GetCheckedOutFoldersAsync();
+                    var remaining = current
+                        .Where(f => !f.Equals(folder, StringComparison.OrdinalIgnoreCase))
+                        .Prepend(GroupsFolderName)
+                        .Select(Quote);
+                    await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", remaining)}", ContentAbsolutePath);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[ContentRepo] Could not update sparse-checkout while deleting '{folder}': {ex.Message}");
+                }
+
+                // 3. Delete the local folder and its .meta from disk.
+                var localFolder = Path.Combine(ContentAbsolutePath, folder);
+                if (Directory.Exists(localFolder))
+                {
+                    try { Directory.Delete(localFolder, true); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete local folder '{localFolder}': {ex.Message}"); }
+                }
+                var meta = localFolder + ".meta";
+                if (File.Exists(meta))
+                {
+                    try { File.Delete(meta); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete meta '{meta}': {ex.Message}"); }
+                }
+
+                Debug.Log($"[ContentRepo] Deleted local-only package '{folder}' (was never pushed to remote).");
+            }
 
             NotifyChange();
             AssetDatabase.Refresh();

@@ -49,9 +49,10 @@ namespace ContentRepo.Editor
         private VisualTreeAsset rowTemplate;
         private bool busy;
         private bool polling;
+        private bool _projectChangedPending;
         private IVisualElementScheduledItem spinnerTick, statusPoller;
 
-        [MenuItem("Tools/Content Browser")]
+        [MenuItem("Window/Content Browser")]
         public static void ShowWindow()
         {
             var w = GetWindow<ContentRepoWindow>();
@@ -75,6 +76,7 @@ namespace ContentRepo.Editor
             WireDeployTab();
 
             ContentGitApi.OnStateChanged += OnExternalStateChanged;
+            EditorApplication.projectChanged += OnProjectChanged;
 
             // Reset busy state so the initial load is never skipped when the window
             // is re-enabled after exiting Play mode (no domain reload occurs, so
@@ -90,6 +92,7 @@ namespace ContentRepo.Editor
         private void OnDisable()
         {
             ContentGitApi.OnStateChanged -= OnExternalStateChanged;
+            EditorApplication.projectChanged -= OnProjectChanged;
             spinnerTick?.Pause(); spinnerTick = null;
             statusPoller?.Pause(); statusPoller = null;
         }
@@ -123,7 +126,7 @@ namespace ContentRepo.Editor
             newFolderRow.style.display = DisplayStyle.None;
             setupBanner.style.display = DisplayStyle.None;
 
-            Q<Image>("img-new-folder").image = LoadIcon("folder-plus");
+            Q<Image>("img-new-folder").image = LoadIcon("plus");
             Q<Image>("img-refresh").image = LoadIcon("refresh-cw");
             Q<Image>("img-pull-all").image = LoadIcon("folder-sync");
         }
@@ -164,19 +167,46 @@ namespace ContentRepo.Editor
             refreshBtn.clicked += () => _ = RunAsync("Refreshing…", () => Task.CompletedTask);
             pullAllBtn.clicked += () => _ = RunAsync("Pulling all…", ContentGitApi.PullAllAsync);
             initBtn.clicked += () => _ = RunAsync("Initializing…", ContentGitApi.InitAsync);
-            newFolderBtn.clicked += () =>
+            var createFolderBtn = Q<Button>("btn-create-folder");
+            var newFolderLabel  = Q<Label>("new-folder-label");
+            void CollapseInput()
             {
-                newFolderRowVisible = !newFolderRowVisible;
-                newFolderRow.style.display = newFolderRowVisible ? DisplayStyle.Flex : DisplayStyle.None;
-                if (newFolderRowVisible) newFolderField.Focus();
-            };
-            Q<Button>("btn-create-folder").clicked += () =>
+                newFolderRowVisible = false;
+                newFolderBtn.style.display   = DisplayStyle.Flex;
+                newFolderLabel.style.display = DisplayStyle.Flex;
+                newFolderField.style.display = DisplayStyle.None;
+                createFolderBtn.style.display = DisplayStyle.None;
+                newFolderField.SetValueWithoutNotify("");
+            }
+            void ConfirmCreate()
             {
                 var name = newFolderField.value?.Trim();
-                if (string.IsNullOrEmpty(name)) { EditorUtility.DisplayDialog("Name required", "Enter a folder name.", "OK"); return; }
-                newFolderRowVisible = false; newFolderRow.style.display = DisplayStyle.None; newFolderField.SetValueWithoutNotify("");
+                if (string.IsNullOrEmpty(name)) return;
+                CollapseInput();
                 _ = RunAsync($"Creating '{name}'…", () => ContentGitApi.CreateFolderAsync(name));
+            }
+            newFolderBtn.clicked += () =>
+            {
+                newFolderRowVisible = true;
+                newFolderBtn.style.display   = DisplayStyle.None;
+                newFolderLabel.style.display = DisplayStyle.None;
+                newFolderField.style.display = DisplayStyle.Flex;
+                createFolderBtn.style.display = DisplayStyle.Flex;
+                newFolderField.Focus();
             };
+            createFolderBtn.clicked += () =>
+            {
+                if (string.IsNullOrEmpty(newFolderField.value?.Trim()))
+                    { EditorUtility.DisplayDialog("Name required", "Enter a folder name.", "OK"); return; }
+                ConfirmCreate();
+            };
+            newFolderField.RegisterCallback<KeyDownEvent>(evt =>
+            {
+                if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
+                    { evt.StopPropagation(); ConfirmCreate(); }
+                else if (evt.keyCode == KeyCode.Escape)
+                    { evt.StopPropagation(); newFolderField.Blur(); CollapseInput(); }
+            }, TrickleDown.TrickleDown);
         }
 
         // ── Deploy tab ────────────────────────────────────────────────────────
@@ -352,8 +382,10 @@ namespace ContentRepo.Editor
                 row.Add(warn);
             }
 
-            row.Add(MakeLiveBadge("staging", stgId));
-            row.Add(MakeProdBadge(prdId, false));
+            var stagingBadge = MakeLiveBadge("staging", stgId);
+            if (stagingBadge != null) row.Add(stagingBadge);
+            var prodBadge = MakeProdBadge(prdId, false);
+            if (prodBadge != null) row.Add(prodBadge);
 
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
@@ -396,13 +428,16 @@ namespace ContentRepo.Editor
             var buildTs   = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
             var lastBuild = ContentBuildApi.GetLastBuildResult(pkg);
             var localBuildId = lastBuild?.BuildId ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
-            var buildMeta = new Label(); buildMeta.AddToClassList("cs-build-meta");
-            buildMeta.text = buildTs.HasValue
+            var buildMetaText = buildTs.HasValue
                 ? $"built {buildTs.Value.ToLocalTime():MM-dd HH:mm}" + (lastBuild != null ? $" · {lastBuild.BuildId[..8]}" : "")
                 : localBuildId != null
                     ? $"local: {localBuildId[..Math.Min(8, localBuildId.Length)]}"
-                    : "never built";
-            row.Add(buildMeta);
+                    : null;
+            if (buildMetaText != null)
+            {
+                var buildMeta = new Label(buildMetaText); buildMeta.AddToClassList("cs-build-meta");
+                row.Add(buildMeta);
+            }
 
             // Staging / production live badges
             var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
@@ -410,8 +445,10 @@ namespace ContentRepo.Editor
             var promoteReady = stgId != null && stgId != prdId;
             if (stagingManifest != null || productionManifest != null)
             {
-                row.Add(MakeLiveBadge("staging", stgId));
-                row.Add(MakeProdBadge(prdId, promoteReady));
+                var stagBadge = MakeLiveBadge("staging", stgId);
+                if (stagBadge != null) row.Add(stagBadge);
+                var prodBadge2 = MakeProdBadge(prdId, promoteReady);
+                if (prodBadge2 != null) row.Add(prodBadge2);
             }
 
             // Local dev badge — visible at a glance when an override is active for this package.
@@ -426,8 +463,9 @@ namespace ContentRepo.Editor
                 row.Add(devBadge);
             }
 
-            // Status + spacer
-            var status = new Label("idle"); status.AddToClassList("cs-pipeline-status"); status.AddToClassList("cs-pipeline-status--idle");
+            // Status + spacer — only added when a pipeline operation is running; starts hidden.
+            var status = new Label(); status.AddToClassList("cs-pipeline-status"); status.AddToClassList("cs-pipeline-status--idle");
+            status.style.display = DisplayStyle.None;
             row.Add(status);
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
@@ -575,10 +613,27 @@ namespace ContentRepo.Editor
             status.RemoveFromClassList("cs-pipeline-status--running");
             switch (state)
             {
-                case "ok":      status.text = "ok";      status.AddToClassList("cs-pipeline-status--ok"); break;
-                case "err":     status.text = "error";   status.AddToClassList("cs-pipeline-status--err"); break;
-                case "running": status.text = "running"; status.AddToClassList("cs-pipeline-status--running"); break;
-                default:        status.text = "idle";    status.AddToClassList("cs-pipeline-status--idle"); break;
+                case "ok":
+                    status.text = "ok";
+                    status.AddToClassList("cs-pipeline-status--ok");
+                    status.style.display = DisplayStyle.Flex;
+                    break;
+                case "err":
+                    status.text = "error";
+                    status.AddToClassList("cs-pipeline-status--err");
+                    status.style.display = DisplayStyle.Flex;
+                    break;
+                case "running":
+                    status.text = "running";
+                    status.AddToClassList("cs-pipeline-status--running");
+                    status.style.display = DisplayStyle.Flex;
+                    break;
+                default:
+                    // "idle" is the reset state — hide the label so it takes no space.
+                    status.text = string.Empty;
+                    status.AddToClassList("cs-pipeline-status--idle");
+                    status.style.display = DisplayStyle.None;
+                    break;
             }
         }
 
@@ -590,11 +645,11 @@ namespace ContentRepo.Editor
             rowUpdaters.Clear(); folderList.Clear();
             if (isInitialized != true) return;
             if (remoteFolders.Count == 0)
-            {
                 folderList.Add(new Label("No folders available.") { style = { unityFontStyleAndWeight = FontStyle.Italic, marginTop = 8, marginLeft = 8 } });
-                return;
-            }
-            foreach (var folder in remoteFolders) folderList.Add(BuildRow(folder));
+            else
+                foreach (var folder in remoteFolders) folderList.Add(BuildRow(folder));
+            newFolderRow.style.display = DisplayStyle.Flex;
+            folderList.Add(newFolderRow);
         }
 
         private VisualElement BuildRow(string folder)
@@ -603,24 +658,21 @@ namespace ContentRepo.Editor
             folderStatuses.TryGetValue(folder, out var status);
             var row = rowTemplate.CloneTree();
 
-            row.Q<Image>("img-rename").image     = LoadIcon("pencil");
             row.Q<Image>("img-pull").image       = LoadIcon("arrow-down-to-line");
             row.Q<Image>("img-push").image       = LoadIcon("arrow-up-from-line");
             row.Q<Image>("img-checkout").image   = LoadIcon("folder-down");
-            row.Q<Image>("img-disconnect").image = LoadIcon("circle-x");
-            row.Q<Image>("img-delete").image     = LoadIcon("trash");
+            row.Q<Image>("img-disconnect").image = LoadIcon("x");
 
-            var nameLabel     = row.Q<Label>("folder-name-label");
-            var renameField   = row.Q<TextField>("folder-rename-field");
-            var renameBtn     = row.Q<Button>("btn-rename");
+            var nameLabel   = row.Q<Label>("folder-name-label");
+            var renameField = row.Q<TextField>("folder-rename-field");
             var badge         = row.Q<VisualElement>("folder-badge-group");
             var pullBtn       = row.Q<Button>("btn-pull");
             var pushBtn       = row.Q<Button>("btn-push");
             var checkoutBtn   = row.Q<Button>("btn-checkout");
             var disconnectBtn = row.Q<Button>("btn-disconnect");
-            var deleteBtn = row.Q<Button>("btn-delete-remote");
-            var expandBtn = row.Q<Button>("btn-expand");
-            var fileList  = row.Q<VisualElement>("file-list");
+            var moreBtn       = row.Q<Button>("btn-more");
+            var expandBtn     = row.Q<Button>("btn-expand");
+            var fileList      = row.Q<VisualElement>("file-list");
 
             nameLabel.text = folder;
             renameField.style.display = DisplayStyle.None;
@@ -783,7 +835,6 @@ namespace ContentRepo.Editor
             void EnterRenameMode() { renameEditing = true; renameField.SetValueWithoutNotify(folder); nameLabel.style.display = DisplayStyle.None; renameField.style.display = DisplayStyle.Flex; renameField.Focus(); renameField.SelectAll(); }
             void ExitRenameMode(bool commit) { renameEditing = false; nameLabel.style.display = DisplayStyle.Flex; renameField.style.display = DisplayStyle.None; if (!commit) return; var n = renameField.value?.Trim(); if (!string.IsNullOrEmpty(n) && n != folder) _ = RunAsync($"Renaming '{folder}'…", () => ContentGitApi.RenameFolderAsync(folder, n)); }
 
-            renameBtn.clicked += () => { if (renameEditing) ExitRenameMode(true); else EnterRenameMode(); };
             renameField.RegisterCallback<KeyDownEvent>(evt => { if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter) { evt.StopPropagation(); ExitRenameMode(true); } else if (evt.keyCode == KeyCode.Escape) { evt.StopPropagation(); ExitRenameMode(false); } });
             checkoutBtn.clicked += () => _ = RunAsync($"Checking out '{folder}'…", () => ContentGitApi.CheckOutFolderAsync(folder));
             disconnectBtn.clicked += () => { if (EditorUtility.DisplayDialog("Disconnect", $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel")) _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder)); };
@@ -801,7 +852,18 @@ namespace ContentRepo.Editor
             }
 
             pushBtn.clicked += () => PromptAndCommit();
-            deleteBtn.clicked += () => { if (EditorUtility.DisplayDialog("Delete remote", $"Permanently delete '{folder}' from the remote?\nThis cannot be undone.", "Delete", "Cancel")) _ = RunAsync($"Deleting '{folder}'…", () => ContentGitApi.DeleteRemoteFolderAsync(folder)); };
+            moreBtn.clicked += () =>
+            {
+                var menu = new GenericMenu();
+                menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
+                menu.AddSeparator("");
+                menu.AddItem(new GUIContent("Delete from repository"), false, () =>
+                {
+                    if (EditorUtility.DisplayDialog("Delete remote", $"Permanently delete '{folder}' from the remote?\nThis cannot be undone.", "Delete", "Cancel"))
+                        _ = RunAsync($"Deleting '{folder}'…", () => ContentGitApi.DeleteRemoteFolderAsync(folder));
+                });
+                menu.DropDown(moreBtn.worldBound);
+            };
 
             return row;
         }
@@ -809,6 +871,20 @@ namespace ContentRepo.Editor
         // ── Async orchestration ───────────────────────────────────────────────
 
         private void OnExternalStateChanged() => EditorApplication.delayCall += () => { if (this == null || busy) return; _ = RunAsync("Refreshing…", () => Task.CompletedTask); };
+
+        // Called by EditorApplication.projectChanged after every AssetDatabase refresh.
+        // We debounce with a single delayCall so rapid reimports only trigger one refresh.
+        private void OnProjectChanged()
+        {
+            if (_projectChangedPending) return;
+            _projectChangedPending = true;
+            EditorApplication.delayCall += () =>
+            {
+                _projectChangedPending = false;
+                if (this == null || busy) return;
+                _ = RunAsync("Refreshing…", () => Task.CompletedTask);
+            };
+        }
 
         private async Task RunAsync(string statusMessage, Func<Task> op)
         {
@@ -846,14 +922,108 @@ namespace ContentRepo.Editor
             try { remoteFolders = await ContentGitApi.GetRemoteFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Remote folders: {ex.Message}"); }
             try { checkedOutFolders = await ContentGitApi.GetCheckedOutFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Checked-out folders: {ex.Message}"); }
 
+            // Also include any folder the developer created directly on disk (via Unity Project
+            // window or file explorer) that isn't on the remote or in sparse-checkout yet.
+            List<string> diskFolders = new List<string>();
+            try { diskFolders = await ContentGitApi.GetLocalFoldersOnDiskAsync(); } catch (Exception ex) { Debug.LogWarning($"Disk folders: {ex.Message}"); }
+
             var allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
             MergeGroupsStatusInto(checkedOutFolders, allStatuses);
             foreach (var f in checkedOutFolders)
             {
-                if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase))) remoteFolders.Add(f);
+                // If a folder is in the sparse-checkout list but no longer exists on disk
+                // and is not on the remote, it's a stale entry — prune it and hide it from UI.
+                var isOnRemote = remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase));
+                var isOnDisk   = diskFolders.Any(d => d.Equals(f, StringComparison.OrdinalIgnoreCase));
+                if (!isOnRemote && !isOnDisk)
+                {
+                    try { await ContentGitApi.RemoveFolderFromSparseCheckoutAsync(f); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not prune stale sparse-checkout entry '{f}': {ex.Message}"); }
+                    Debug.Log($"[ContentRepo] Pruned stale sparse-checkout entry '{f}' — not on remote or disk.");
+                    continue;
+                }
+
+                if (!isOnRemote) remoteFolders.Add(f);
+                allStatuses.TryGetValue(f, out var s); folderStatuses[f] = s;
+            }
+            foreach (var f in diskFolders)
+            {
+                if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase)))
+                {
+                    remoteFolders.Add(f);
+                    // Also register in sparse-checkout so the folder is tracked in git.
+                    try { await ContentGitApi.EnsureFolderInSparseCheckoutAsync(f); } catch { /* best-effort */ }
+                }
+                if (!checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase)))
+                    checkedOutFolders.Add(f);
                 allStatuses.TryGetValue(f, out var s); folderStatuses[f] = s;
             }
             remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
+
+            // Clean up ContentLocalDevOverrides for packages whose local folder no longer exists
+            // on disk. This happens when a developer deletes the folder from the Project window
+            // or file explorer — the override should not persist after the assets are gone.
+            foreach (var pkg in ContentLocalDevOverrides.All.Keys.ToList())
+            {
+                if (!diskFolders.Any(f => f.Equals(pkg, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ContentLocalDevApi.ClearOverride(pkg);
+                    Debug.Log($"[ContentRepo] Cleared local dev override for '{pkg}' — folder no longer on disk.");
+                }
+            }
+
+            // Clean up orphan Addressables groups in _groups/ whose content package no longer
+            // exists locally (on disk) or on the remote. Auto-generated groups are created by
+            // EnsureGroupPopulated / ContentGroupAutoSetup and should be removed together with
+            // the package folder so they don't clutter the Addressables Groups window.
+            CleanupOrphanAddressableGroups(remoteFolders, diskFolders);
+        }
+
+        /// <summary>
+        /// Deletes Addressables group assets from <c>_groups/</c> whose package name is not
+        /// present in either <paramref name="remoteFolders"/> (known on the remote) or
+        /// <paramref name="diskFolders"/> (present locally on disk).  These orphan groups are
+        /// auto-generated by <see cref="ContentLocalDevApi.EnsureGroupPopulated"/> /
+        /// <see cref="ContentGroupAutoSetup"/> and should be removed with the package.
+        /// </summary>
+        private static void CleanupOrphanAddressableGroups(
+            IReadOnlyList<string> remoteFolders,
+            IReadOnlyList<string> diskFolders)
+        {
+            var addressableSettings = UnityEditor.AddressableAssets.AddressableAssetSettingsDefaultObject.Settings;
+            if (addressableSettings == null) return;
+
+            // Build a fast lookup of all known package names.
+            var known = new System.Collections.Generic.HashSet<string>(
+                remoteFolders.Concat(diskFolders),
+                StringComparer.OrdinalIgnoreCase);
+
+            // Collect groups to remove — never remove groups whose name is in the known set
+            // and never touch the default group or internal Addressables groups.
+            var toRemove = addressableSettings.groups
+                .Where(g => g != null
+                         && !g.IsDefaultGroup()
+                         && !known.Contains(g.name))
+                .ToList();
+
+            foreach (var group in toRemove)
+            {
+                // Only remove if the group asset lives inside _groups/ — this avoids
+                // accidentally deleting manually-created groups that have nothing to do
+                // with ContentRepo.
+                var assetPath = UnityEditor.AssetDatabase.GetAssetPath(group);
+                if (string.IsNullOrEmpty(assetPath)) continue;
+
+                var normalised = assetPath.Replace('\\', '/');
+                var groupsFolderSegment = $"/{ContentGitApi.GroupsFolderName}/";
+                if (!normalised.Contains(groupsFolderSegment)) continue;
+
+                Debug.Log($"[ContentRepo] Removing orphan Addressables group '{group.name}' — package no longer exists.");
+                addressableSettings.RemoveGroup(group);
+            }
+
+            if (toRemove.Any(g => g != null))
+                UnityEditor.AssetDatabase.SaveAssets();
         }
 
         // Distributes _groups/<GroupFile> status entries to the content package they belong to,
@@ -978,7 +1148,8 @@ namespace ContentRepo.Editor
             var promoteReady = stgId != null && stgId != prdId;
             if (stgId != null)
                 group.Add(MakeLiveBadge("staging", stgId));
-            group.Add(MakeProdBadge(prdId, promoteReady));
+            var applyProdBadge = MakeProdBadge(prdId, promoteReady);
+            if (applyProdBadge != null) group.Add(applyProdBadge);
         }
 
         private static Label MakeBadge(string text, string cls, string tooltip = null)
@@ -989,18 +1160,22 @@ namespace ContentRepo.Editor
             return l;
         }
 
+        // Returns null when buildId is null — callers must null-check before adding.
         private static Label MakeLiveBadge(string env, string buildId)
         {
-            var text    = buildId != null ? $"{env}: {buildId[..Math.Min(8, buildId.Length)]}" : $"{env}: —";
-            var tooltip = buildId != null ? $"Live on {env}\n{buildId}" : $"Not published to {env}";
+            if (buildId == null) return null;
+            var text    = $"{env}: {buildId[..Math.Min(8, buildId.Length)]}";
+            var tooltip = $"Live on {env}\n{buildId}";
             var l = new Label(text) { tooltip = tooltip };
             l.AddToClassList("cs-badge");
-            l.AddToClassList(buildId != null ? "cs-badge--stg" : "cs-badge--off");
+            l.AddToClassList("cs-badge--stg");
             return l;
         }
 
+        // Returns null when there is nothing meaningful to show (no prdId, not promote-ready).
         private static Label MakeProdBadge(string prdId, bool promoteReady)
         {
+            if (!promoteReady && prdId == null) return null;
             string text; string cls; string tooltip;
             if (promoteReady)
             {
@@ -1008,17 +1183,11 @@ namespace ContentRepo.Editor
                 cls     = "cs-badge--promote";
                 tooltip = $"Staging has a newer build — ready to promote\nProduction: {prdId ?? "none"}";
             }
-            else if (prdId != null)
+            else
             {
                 text    = $"production: {prdId[..Math.Min(8, prdId.Length)]}";
                 cls     = "cs-badge--prod";
                 tooltip = $"Live on production\n{prdId}";
-            }
-            else
-            {
-                text    = "production: —";
-                cls     = "cs-badge--off";
-                tooltip = "Not published to production";
             }
             var l = new Label(text) { tooltip = tooltip };
             l.AddToClassList("cs-badge");

@@ -4,12 +4,16 @@
         <ui:VisualElement name="row-body" class="cs-folder-row-body">
             <ui:Button name="btn-expand" text="▶" class="cs-icon-btn cs-expand-btn" tooltip="Show changed files" style="display:none;" />
 
+            <ui:Button name="btn-disconnect" class="cs-icon-btn cs-icon-btn--muted" tooltip="Disconnect (remove local files)">
+                <ui:Image name="img-disconnect" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
+            <ui:Button name="btn-checkout" class="cs-icon-btn" tooltip="Check out this folder">
+                <ui:Image name="img-checkout" class="cs-icon-image" picking-mode="Ignore" />
+            </ui:Button>
+
             <ui:Label      name="folder-name-label"  class="cs-folder-name" />
             <ui:TextField  name="folder-rename-field" class="cs-folder-name cs-rename-field" />
-
-            <ui:Button name="btn-rename" class="cs-icon-btn" tooltip="Rename folder">
-                <ui:Image name="img-rename" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
 
             <ui:VisualElement name="folder-badge-group" class="cs-badge-group" />
 
@@ -23,17 +27,7 @@
                 <ui:Image name="img-push" class="cs-icon-image" picking-mode="Ignore" />
             </ui:Button>
 
-            <ui:Button name="btn-checkout" class="cs-icon-btn" tooltip="Check out this folder">
-                <ui:Image name="img-checkout" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
-
-            <ui:Button name="btn-disconnect" class="cs-icon-btn" tooltip="Disconnect (remove local files)">
-                <ui:Image name="img-disconnect" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
-
-            <ui:Button name="btn-delete-remote" class="cs-icon-btn cs-danger" tooltip="Delete folder from remote repository">
-                <ui:Image name="img-delete" class="cs-icon-image" picking-mode="Ignore" />
-            </ui:Button>
+            <ui:Button name="btn-more" text="⋮" class="cs-icon-btn cs-menu-btn" tooltip="More actions" />
         </ui:VisualElement>
 
         <ui:VisualElement name="file-list" class="cs-file-list" style="display:none;" />

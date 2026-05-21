@@ -30,6 +30,13 @@
     background-color: rgba(60, 120, 200, 0.08);
 }
 
+.cs-new-folder-label {
+    margin-left: 6px;
+    font-size: 12px;
+    color: rgba(180, 180, 180, 0.55);
+    -unity-font-style: italic;
+}
+
 .cs-setup-banner {
     margin: 8px;
     padding: 10px;
@@ -152,6 +159,14 @@
 
 .cs-icon-btn:hover {
     background-color: rgba(255, 255, 255, 0.12);
+}
+
+.cs-icon-btn--muted {
+    opacity: 0.4;
+}
+
+.cs-icon-btn--muted:hover {
+    opacity: 1;
 }
 
 .cs-icon-btn.cs-danger:hover {

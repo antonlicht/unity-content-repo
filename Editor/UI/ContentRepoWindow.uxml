@@ -12,20 +12,21 @@
             <ui:VisualElement name="top-bar" class="cs-top-bar">
                 <ui:Label name="title-label" text="Content Browser" class="cs-title" />
                 <ui:VisualElement class="cs-flex-spacer" />
-                <ui:Button name="btn-new-folder" class="cs-icon-btn cs-icon-btn--lg" tooltip="New folder">
-                    <ui:Image name="img-new-folder" class="cs-icon-image" picking-mode="Ignore" />
-                </ui:Button>
-                <ui:Button name="btn-refresh" class="cs-icon-btn cs-icon-btn--lg" tooltip="Refresh folder list">
+                <ui:Button name="btn-refresh" class="cs-icon-btn cs-icon-btn--lg" tooltip="Refresh">
                     <ui:Image name="img-refresh" class="cs-icon-image" picking-mode="Ignore" />
                 </ui:Button>
-                <ui:Button name="btn-pull-all" class="cs-icon-btn cs-icon-btn--lg" tooltip="Pull all checked-out folders">
+                <ui:Button name="btn-pull-all" class="cs-icon-btn cs-icon-btn--lg" tooltip="Pull all">
                     <ui:Image name="img-pull-all" class="cs-icon-image" picking-mode="Ignore" />
                 </ui:Button>
             </ui:VisualElement>
 
             <ui:VisualElement name="new-folder-row" class="cs-new-folder-row">
-                <ui:TextField name="new-folder-field" class="cs-commit-field" tooltip="Enter a folder name, then click Create" />
-                <ui:Button name="btn-create-folder" text="Create" />
+                <ui:Button name="btn-new-folder" class="cs-icon-btn" tooltip="New folder">
+                    <ui:Image name="img-new-folder" class="cs-icon-image" picking-mode="Ignore" />
+                </ui:Button>
+                <ui:Label name="new-folder-label" text="Create new content package" class="cs-new-folder-label" />
+                <ui:TextField name="new-folder-field" tooltip="Enter a folder name, then click Create" style="display:none; flex-grow:1;" />
+                <ui:Button name="btn-create-folder" text="Create" style="display:none;" />
             </ui:VisualElement>
 
             <ui:VisualElement name="setup-banner" class="cs-setup-banner">

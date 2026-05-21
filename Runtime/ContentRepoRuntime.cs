@@ -125,7 +125,60 @@ namespace ContentRepo
                 var platformEntry = entry.FindPlatform(platform);
                 if (platformEntry == null)
                 {
-                    Debug.LogWarning($"[ContentRepo] '{entry.name}' has no catalog for platform '{platform}'. Skipping.");
+                    // Before giving up, check whether a local dev override covers this package.
+                    // This handles the case where a package is listed in the CDN manifest (e.g.
+                    // for another platform) but has no entry for the current platform yet — a
+                    // local AssetDatabase or LocalBundles override should still work.
+                    if (ContentLocalDevOverrides.TryGet(entry.name, out var localDevFallback))
+                    {
+                        var fallbackItem = new CatalogLoadResult
+                        {
+                            ContentPackageName = entry.name,
+                            Platform           = platform,
+                        };
+                        switch (localDevFallback.Mode)
+                        {
+                            case LocalDevMode.AssetDatabase:
+                                Debug.Log($"[ContentRepo] LOCAL DEV (AssetDatabase, no platform entry): skipping catalog for '{entry.name}'.");
+                                fallbackItem.Success = true;
+                                results.Add(fallbackItem);
+                                break;
+
+                            case LocalDevMode.LocalBundles:
+                                fallbackItem.CatalogUrl = localDevFallback.LocalCatalogUrl;
+                                Debug.Log($"[ContentRepo] LOCAL DEV (LocalBundles, no platform entry): catalog → '{fallbackItem.CatalogUrl}' for '{entry.name}'.");
+                                var fbHandle = new AsyncOperationHandle<IResourceLocator>();
+                                try
+                                {
+                                    fbHandle = Addressables.LoadContentCatalogAsync(fallbackItem.CatalogUrl, autoReleaseHandle: false);
+                                    IResourceLocator fbLocator = null;
+                                    try { fbLocator = await fbHandle.Task; } catch { /* see fbHandle.OperationException */ }
+
+                                    if (fbHandle.Status != AsyncOperationStatus.Succeeded || fbLocator == null)
+                                    {
+                                        var reason = fbHandle.OperationException?.Message
+                                            ?? (fbLocator == null ? "Catalog load returned null locator." : "Operation did not succeed.");
+                                        Addressables.Release(fbHandle);
+                                        throw new InvalidOperationException(reason);
+                                    }
+                                    fallbackItem.Handle  = fbHandle;
+                                    fallbackItem.Locator = fbLocator;
+                                    fallbackItem.Success = true;
+                                }
+                                catch (Exception ex)
+                                {
+                                    fallbackItem.Success = false;
+                                    fallbackItem.Error   = ex.Message;
+                                    Debug.LogError($"[ContentRepo] Catalog load failed for local-override '{entry.name}' ({fallbackItem.CatalogUrl}): {ex.Message}");
+                                }
+                                results.Add(fallbackItem);
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[ContentRepo] '{entry.name}' has no catalog for platform '{platform}'. Skipping.");
+                    }
                     continue;
                 }
 
@@ -209,6 +262,68 @@ namespace ContentRepo
 
                 results.Add(item);
             }
+
+            // ── Local-only packages (not in CDN manifest) ────────────────────────
+            // A brand-new content package hasn't been built/deployed yet, so it has
+            // no entry in the CDN manifest. If a developer registered it via
+            // ContentLocalDevApi (Fast Mode or LocalBundles) it still needs to be
+            // processed so its assets are available at runtime.
+            foreach (var kv in ContentLocalDevOverrides.All)
+            {
+                ct.ThrowIfCancellationRequested();
+                var packageName = kv.Key;
+
+                // Already processed above via the CDN manifest loop — skip.
+                if (manifest.Find(packageName) != null) continue;
+
+                var localDev = kv.Value;
+                var item = new CatalogLoadResult
+                {
+                    ContentPackageName = packageName,
+                    Platform = platform,
+                };
+
+                switch (localDev.Mode)
+                {
+                    case LocalDevMode.AssetDatabase:
+                        Debug.Log($"[ContentRepo] LOCAL DEV (AssetDatabase, manifest-absent): skipping catalog for '{packageName}'.");
+                        item.Success = true;
+                        results.Add(item);
+                        break;
+
+                    case LocalDevMode.LocalBundles:
+                        item.CatalogUrl = localDev.LocalCatalogUrl;
+                        Debug.Log($"[ContentRepo] LOCAL DEV (LocalBundles, manifest-absent): catalog → '{item.CatalogUrl}' for '{packageName}'.");
+                        var lbHandle = new AsyncOperationHandle<IResourceLocator>();
+                        try
+                        {
+                            lbHandle = Addressables.LoadContentCatalogAsync(item.CatalogUrl, autoReleaseHandle: false);
+                            IResourceLocator lbLocator = null;
+                            try { lbLocator = await lbHandle.Task; } catch { /* see lbHandle.OperationException */ }
+
+                            if (lbHandle.Status != AsyncOperationStatus.Succeeded || lbLocator == null)
+                            {
+                                var reason = lbHandle.OperationException?.Message
+                                    ?? (lbLocator == null ? "Catalog load returned null locator." : "Operation did not succeed.");
+                                Addressables.Release(lbHandle);
+                                throw new InvalidOperationException(reason);
+                            }
+
+                            item.Handle  = lbHandle;
+                            item.Locator = lbLocator;
+                            item.Success = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            item.Success = false;
+                            item.Error   = ex.Message;
+                            Debug.LogError($"[ContentRepo] Catalog load failed for local-only '{packageName}' ({item.CatalogUrl}): {ex.Message}");
+                        }
+                        results.Add(item);
+                        break;
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────────
 
             return results;
         }

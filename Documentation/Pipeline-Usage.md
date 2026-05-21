@@ -172,6 +172,16 @@ The process exits `0` on success and `1` on failure.
 
 > The first build creates `_groups/Episode02.asset` inside the content repo. Commit and push this file — it stores the group's stable GUID and custom addresses, and is restored automatically when any developer checks out the package.
 
+### Testing a new package before the first deploy
+
+Before the package is uploaded it has no CDN manifest entry, so the runtime skips it. Use the Local Dev override to test it immediately:
+
+1. Check out the folder in the **Repository** tab (or create it locally).
+2. In the **Deploy** tab open `⋮ > Local Dev > Use Locally (Fast Mode / AssetDatabase)`. This creates the Addressables group if it doesn't exist yet, labels every asset with the package name, and registers an AssetDatabase override.
+3. Switch the Addressables Play Mode Script to **Use Asset Database (fastest)**.
+4. Enter Play Mode. The runtime injects the package into catalog loading even though it has no CDN manifest entry — assets are served directly from AssetDatabase.
+5. When ready, build and upload normally, then remove the override via `⋮ > Local Dev > Clear`.
+
 ---
 
 ## Loading content at runtime
@@ -221,6 +231,7 @@ Call `ContentRepoRuntime.RefreshAsync(baseUrl, environment)` to re-fetch the man
 - **Local Dev: `No catalog JSON found in '…'`** — enable **Build Remote Catalog** in the Addressables settings for this package.
 - **Local Dev: assets not updating after re-running Fast Mode** — click **Refresh** in the Addressables Groups window, then re-enter Play Mode.
 - **Local Dev: badge missing after domain reload** — open `⋮ > Local Dev` and re-register the override.
+- **New package not loading in Play Mode** — the package isn't in the CDN manifest yet. Register it via `⋮ > Local Dev > Use Locally (Fast Mode / AssetDatabase)`; the runtime injects it automatically until you deploy and clear the override.
 - **Addressables group is empty after checkout** — the group asset was restored from `_groups/` automatically when you checked out the package. If it still appears empty, the group file may not have been committed to the content repo yet; run the first build and push `_groups/<packageName>.asset`.
 - **CloudFront `TooManyInvalidationsInProgress`** — free quota is 1 000 paths/month. Batch uploads or wait for the previous invalidation to complete.
 - **CDN serves stale content after upload** — the Upload action invalidates `/<env>/manifest.json` automatically. If you pushed manually, run `aws cloudfront create-invalidation` yourself.
