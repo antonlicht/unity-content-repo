@@ -414,6 +414,18 @@ namespace ContentRepo.Editor
                 row.Add(MakeProdBadge(prdId, promoteReady));
             }
 
+            // Local dev badge — visible at a glance when an override is active for this package.
+            var devOverrideActive = ContentLocalDevOverrides.TryGet(pkg, out var devBadgeEntry);
+            if (devOverrideActive)
+            {
+                var devBadgeText = devBadgeEntry.Mode == LocalDevMode.AssetDatabase ? "local: AssetDB" : "local: bundles";
+                var devBadge = MakeBadge(devBadgeText, "cs-badge--local-dev",
+                    devBadgeEntry.Mode == LocalDevMode.AssetDatabase
+                        ? "Assets are served from AssetDatabase (Fast Mode). CDN bypassed for this package."
+                        : "Bundles are served from local disk. CDN bypassed for this package.");
+                row.Add(devBadge);
+            }
+
             // Status + spacer
             var status = new Label("idle"); status.AddToClassList("cs-pipeline-status"); status.AddToClassList("cs-pipeline-status--idle");
             row.Add(status);
@@ -490,6 +502,46 @@ namespace ContentRepo.Editor
                         _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
                             async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
                             deployLog));
+
+                // ── Local dev overrides ──────────────────────────────────────
+                menu.AddSeparator("");
+                var isAssetDb      = ContentLocalDevOverrides.TryGet(pkg, out var devEntry)
+                                     && devEntry.Mode == LocalDevMode.AssetDatabase;
+                var isLocalBundles = ContentLocalDevOverrides.TryGet(pkg, out devEntry)
+                                     && devEntry.Mode == LocalDevMode.LocalBundles;
+
+                // AssetDatabase (Fast Mode)
+                if (!isAssetDb)
+                    menu.AddItem(new GUIContent("Local Dev / Use Asset Database (Fast Mode)"), false, () =>
+                    {
+                        try   { ContentLocalDevApi.SetupForFastMode(pkg, AppendDeployLog); RebuildDeployRows(); }
+                        catch (Exception ex) { AppendDeployLog($"ERROR: {ex.Message}"); Debug.LogException(ex); }
+                    });
+                else
+                    menu.AddItem(new GUIContent("\u2713 Local Dev: Asset Database active — Clear"), false, () =>
+                    {
+                        ContentLocalDevApi.ClearFastMode(pkg, AppendDeployLog);
+                        RebuildDeployRows();
+                    });
+
+                // Local Bundles (Build + Use Existing Build)
+                if (!isLocalBundles)
+                    menu.AddItem(new GUIContent("Local Dev / Build and Use Local Bundles"), false, () =>
+                        _ = RunPipelineAsync($"Build & register local bundles for '{pkg}'\u2026",
+                            async () =>
+                            {
+                                SetPipelineStatus(status, "running");
+                                try   { await ContentLocalDevApi.BuildAndRegisterLocalBundlesAsync(pkg, AppendDeployLog); SetPipelineStatus(status, "ok"); }
+                                catch { SetPipelineStatus(status, "err"); throw; }
+                                finally { RebuildDeployRows(); }
+                            }, deployLog));
+                else
+                    menu.AddItem(new GUIContent("\u2713 Local Dev: Local Bundles active — Clear"), false, () =>
+                    {
+                        ContentLocalDevApi.ClearLocalBundles(pkg, AppendDeployLog);
+                        RebuildDeployRows();
+                    });
+
                 menu.DropDown(moreBtn.worldBound);
             };
             row.Add(moreBtn);

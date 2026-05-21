@@ -1,85 +1,97 @@
-# Content Browser
+﻿# Content Repo
 
-Unity editor tooling for managing a shared content repository via git sparse-checkout.
-Each developer checks out only the folders (chapters, episodes, etc.) they need — no terminal required.
+Unity editor tooling for managing a shared content repository via git sparse-checkout, plus an
+Addressables build, CDN upload, and local-dev-override pipeline.
+
+Each developer checks out only the content package folders they need. Assets are built per-package,
+uploaded to a CDN (S3 + CloudFront), and loaded at runtime via a master manifest — without bundling
+any content into the player build.
+
+**Package name:** `com.antonlicht.content-repo`
+
+---
 
 ## Installation
 
-Install as an embedded package: drop the package folder into the `Packages/` directory of your Unity project.
-Or add it via `Window > Package Manager` using a git URL.
+Install as an embedded package: drop the folder into `Packages/` in your Unity project.  
+Or add via **Window > Package Manager** using a git URL.
 
-**Package name:** `com.antonlicht.content-browser`
+---
 
-> The package folder may still be named `com.antonlicht.content-submodules` on disk if you are upgrading
-> from an earlier version. Unity discovers embedded packages by `package.json`, not folder name, so this
-> has no functional impact. You can rename the folder manually once Unity is closed.
+## Initial Setup
 
-## Setup
-
-1. Open **Project Settings > Content Browser**.
-2. Configure:
-   - **Local path** — path inside the Unity project where the content repository will live, relative to the project root (e.g. `Assets/Content`).
+1. Open **Project Settings > Content Repo** and configure:
+   - **Local path** — path inside the project where the content repository will live (e.g. `Assets/Content`).
    - **Remote URL** — the git remote of the content repository.
    - **Default branch** — the branch to track (e.g. `main`).
-3. Commit `ProjectSettings/ContentBrowser.asset` to the parent project so the team can share the settings.
-4. Open **Tools > Content Browser**.
-5. Click **Initialize**. This clones the content repository at the configured path and writes a `.gitignore` next to it so the parent project's git status stays clean.
+   - **Upload** sub-section — S3 bucket, region, CloudFront distribution ID, CDN domain, and AWS credentials.
+2. Commit `ProjectSettings/ContentRepo.asset` so the whole team shares the settings.
+3. Open **Tools > Content Browser**, then click **Initialize** to clone the content repository.
+4. Follow **[Documentation/Setup-AWS.md](Documentation/Setup-AWS.md)** to set up the CDN infrastructure.
 
-## Daily use
+---
 
-The editor window lists every top-level folder available in the content repository's remote HEAD.
-For each folder you can:
+## Daily Workflow
 
-- **Check out** — adds the folder to sparse-checkout and pulls.
-- **Pull** (`↓` icon, visible when behind remote) — pulls the latest changes.
-- **Commit & Push** (`↑` icon, visible when there are local changes) — opens an inline commit message field, then commits and pushes.
-- **Rename** (`✎` icon) — inline rename that commits and pushes.
-- **Disconnect** — removes the folder from sparse-checkout and deletes local files (with confirmation).
-- **Delete remote** (`🗑` icon) — removes the folder from the remote repository (with confirmation).
+Open **Tools > Content Browser**. Two tabs are available:
 
-The `+ New Folder` button (top bar) creates a new folder in the repository, commits a `.gitkeep`, and pushes.
+### Repository tab
 
-`Refresh` re-reads remote and local state. `Pull All` runs a single pull for everything currently checked out.
+Lists every top-level folder in the content repository's remote HEAD. Per folder:
 
-The badge on each row updates live every 5 seconds using a single `git status -sb` call:
-- `clean` (green) — no local changes
-- `↑N ~M ?K` (yellow) — staged / modified / untracked counts
-- `↑N` alone (blue) — only staged, nothing dirty
-- `not checked out` (grey)
+| Action | How |
+|---|---|
+| Check out | Click the folder row |
+| Pull latest | `↓` icon (visible when behind remote) |
+| Commit & Push | `↑` icon → inline message field |
+| Rename | `✎` icon |
+| Disconnect | Remove from sparse-checkout + delete local files |
+| Delete remote | `🗑` icon |
 
-## Scripting API
+`+ New Folder` creates a new package folder, commits a `.gitkeep`, and pushes.  
+`Refresh` re-reads remote and local state. `Pull All` pulls every checked-out folder.
+
+Live status badges update every 5 seconds:
+
+| Badge | Meaning |
+|---|---|
+| `clean` (green) | No local changes |
+| `↑N ~M ?K` (yellow) | Staged / modified / untracked counts |
+| `stg: <id>` | Build ID currently live on staging |
+| `prod: <id>` | Build ID currently live on production |
+| `→ prod ready` | Staging is ahead of production |
+
+### Deploy tab
+
+See **[Documentation/Pipeline-Usage.md](Documentation/Pipeline-Usage.md)** for the full build, upload,
+promote, and local-dev-override workflow.
+
+---
+
+## Runtime Loading
 
 ```csharp
-using ContentBrowser.Editor;
+using ContentRepo;
+using UnityEngine.AddressableAssets;
 
-// One-time initialization
-await ContentGitApi.InitAsync();
+// At app startup — fetches the CDN manifest and registers all remote catalogs.
+var result = await ContentRepoRuntime.InitializeAsync(
+    baseUrl: "https://xxxx.cloudfront.net",
+    environment: "production");
 
-// Folder management
-await ContentGitApi.CheckOutFolderAsync("Chapter01");
-await ContentGitApi.PullFolderAsync("Chapter01");
-await ContentGitApi.CommitAndPushFolderAsync("Chapter01", "Update level layout");
-await ContentGitApi.DisconnectFolderAsync("Chapter01");
-
-// Live status
-var statuses = await ContentGitApi.GetAllFolderStatusesAsync();
-// ContentGitApi.RepositoryAhead / .RepositoryBehind — set by the last status poll
-
-// Fired after every mutating operation
-ContentGitApi.OnStateChanged += () => { /* refresh your tooling */ };
-
-// Settings
-var url = ContentBrowserSettings.instance.RemoteUrl;
+// Assets across all content packages are now available via Addressables.
+var prefab = await Addressables.LoadAssetAsync<GameObject>("Episode01/Hero").Task;
 ```
 
-## Zero-noise parent repo
+`InitializeAsync` falls back to the last cached manifest when the CDN is unreachable, so the app
+can boot offline. See [Pipeline-Usage.md §Loading content at runtime](Documentation/Pipeline-Usage.md#loading-content-at-runtime)
+for the config-driven bootstrap option.
 
-`InitAsync` uses a plain `git clone` (not `git submodule add`) and writes a `.gitignore` next to the
-cloned directory (e.g. `Assets/.gitignore`) that ignores both the content folder and its Unity `.meta`
-file. After the team lead commits `ProjectSettings/ContentBrowser.asset` and `Assets/.gitignore` once,
-every other developer can initialize Content Browser without any git noise appearing in the parent project.
+---
 
 ## Requirements
 
 - Unity 6000.0 or newer.
-- `git` available on the system `PATH`. If git is missing the window shows a clear error in its status bar.
+- `com.unity.addressables` 2.9.1 or newer.
+- `git` available on the system `PATH`.
+- AWS CLI on `PATH` for upload operations. See [Setup-AWS.md](Documentation/Setup-AWS.md).

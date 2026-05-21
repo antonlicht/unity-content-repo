@@ -137,6 +137,32 @@ namespace ContentRepo
                     BuildId = platformEntry.buildId,
                 };
 
+                // ── Local dev override ────────────────────────────────────────────
+                // Checked-out packages registered via ContentLocalDevApi (Editor) bypass
+                // CDN catalog loading entirely (AssetDatabase mode) or redirect to a local
+                // file:// catalog (LocalBundles mode). Packages without an override continue
+                // to use the CDN URL, providing automatic fallback for content not checked out.
+                if (ContentLocalDevOverrides.TryGet(entry.name, out var localDev))
+                {
+                    switch (localDev.Mode)
+                    {
+                        case LocalDevMode.AssetDatabase:
+                            // Fast Mode: Addressables' AssetDatabase provider resolves assets
+                            // directly — no catalog fetch needed.
+                            Debug.Log($"[ContentRepo] LOCAL DEV (AssetDatabase): skipping catalog for '{entry.name}'.");
+                            item.Success = true;
+                            results.Add(item);
+                            continue;
+
+                        case LocalDevMode.LocalBundles:
+                            // Replace CDN URL with the local file:// catalog written by ContentLocalDevApi.
+                            item.CatalogUrl = localDev.LocalCatalogUrl;
+                            Debug.Log($"[ContentRepo] LOCAL DEV (LocalBundles): catalog → '{item.CatalogUrl}' for '{entry.name}'.");
+                            break;
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────────
+
                 // Skip if same buildId already loaded and force not requested.
                 var cacheKey = $"{entry.name}/{platform}";
                 if (!force
@@ -152,7 +178,7 @@ namespace ContentRepo
                 var handle = new AsyncOperationHandle<IResourceLocator>();
                 try
                 {
-                    handle = Addressables.LoadContentCatalogAsync(platformEntry.catalogUrl, autoReleaseHandle: false);
+                    handle = Addressables.LoadContentCatalogAsync(item.CatalogUrl, autoReleaseHandle: false);
 
                     // Swallow the task exception — the real error is on handle.OperationException.
                     IResourceLocator locator = null;
