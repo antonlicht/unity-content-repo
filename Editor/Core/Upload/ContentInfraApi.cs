@@ -111,7 +111,7 @@ namespace ContentRepo.Editor
             };
 
             var cmd = $"aws {displayArgs ?? args}";
-            UnityEngine.Debug.Log($"[ContentRepo] > {cmd}");
+            if (log != null) UnityEngine.Debug.Log($"[ContentRepo] > {cmd}");
             log?.Invoke($"> {cmd}");
 
             return Task.Run(() =>

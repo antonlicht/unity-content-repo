@@ -84,11 +84,22 @@ namespace ContentRepo.Editor
                     $"Addressables profile '{buildSettings.AddressablesProfileName}' not found. " +
                     $"Configure it under Project Settings > Content Repo > Build.");
 
-            var previousActiveProfile    = settings.activeProfileId;
-            var previousPlayerVersion    = settings.OverridePlayerVersion;
+            var previousActiveProfile         = settings.activeProfileId;
+            var previousPlayerVersion         = settings.OverridePlayerVersion;
             var previousBuildRemoteCatalog    = settings.BuildRemoteCatalog;
             var previousRemoteCatalogBuildId  = settings.RemoteCatalogBuildPath.Id;
             var previousRemoteCatalogLoadId   = settings.RemoteCatalogLoadPath.Id;
+            var previousBuilderIndex          = settings.ActivePlayerDataBuilderIndex;
+
+            // BuildPlayerContent requires the packed-mode builder (Default Build Script).
+            // Play Mode Scripts (Use Asset Database / Use Existing Build) cannot produce bundles.
+            var packedBuilderIndex = settings.DataBuilders.FindIndex(
+                b => b != null && b.GetType().Name == "BuildScriptPackedMode");
+            if (packedBuilderIndex < 0)
+                throw new InvalidOperationException(
+                    "Could not find 'Default Build Script' (BuildScriptPackedMode) in Addressables DataBuilders. " +
+                    "Add it under Addressables > Settings > Build and Play Mode Scripts.");
+            settings.ActivePlayerDataBuilderIndex = packedBuilderIndex;
 
             // CreateValue is required before SetValue — ensure both profile variables exist.
             // Use activeProfileId here because we haven't switched to profileId yet.
@@ -226,6 +237,7 @@ namespace ContentRepo.Editor
                 settings.activeProfileId = previousActiveProfile;
                 settings.OverridePlayerVersion = previousPlayerVersion;
                 settings.BuildRemoteCatalog = previousBuildRemoteCatalog;
+                settings.ActivePlayerDataBuilderIndex = previousBuilderIndex;
                 if (previousRemoteCatalogBuildId != null)
                     settings.RemoteCatalogBuildPath.SetVariableById(settings, previousRemoteCatalogBuildId);
                 if (previousRemoteCatalogLoadId != null)
@@ -408,18 +420,25 @@ namespace ContentRepo.Editor
                     postEvent: false,
                     schemasToCopy: null,
                     typeof(BundledAssetGroupSchema));
-
-                var schema = group.GetSchema<BundledAssetGroupSchema>();
-                EnsureProfileVariable(settings, buildSettings.RemoteBuildPathVariableName, "ServerData/[BuildTarget]", log);
-                EnsureProfileVariable(settings, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder, log);
-                schema.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
-                schema.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
-                schema.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
                 log?.Invoke($"[Build] Created group '{contentPackageName}'");
             }
             else
             {
                 log?.Invoke($"[Build] Reusing group '{contentPackageName}' (stable GUID)");
+            }
+
+            // Always (re-)configure build/load paths. The group may have been created by
+            // EnsureGroupPopulated (fast mode setup) which leaves the default Library path in
+            // the schema — reusing it without this would write bundles there instead of to the
+            // expected build output path, causing the "No .bundle files found" error.
+            EnsureProfileVariable(settings, buildSettings.RemoteBuildPathVariableName, "ServerData/[BuildTarget]", log);
+            EnsureProfileVariable(settings, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder, log);
+            var schemaCfg = group.GetSchema<BundledAssetGroupSchema>();
+            if (schemaCfg != null)
+            {
+                schemaCfg.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
+                schemaCfg.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
+                schemaCfg.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
             }
 
             // Ensure the group file lives in _groups/ in the content repo so it can be
@@ -440,8 +459,7 @@ namespace ContentRepo.Editor
                     log?.Invoke($"[Build] Group file is at '{targetGroupPath}' (in content repo, commit with other changes).");
             }
 
-            var schemaRef = group.GetSchema<BundledAssetGroupSchema>();
-            schemaRef.IncludeInBuild = true;
+            schemaCfg.IncludeInBuild = true;
 
             // Sync entries without resetting addresses: remove stale entries (assets deleted from
             // the folder), add new ones, and leave existing entries untouched so any custom

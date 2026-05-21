@@ -16,50 +16,65 @@ namespace ContentRepo.Editor
         private const string UssPath = PackageRoot + "/Editor/UI/ContentRepoWindow.uss";
         private const string FolderRowUxmlPath = PackageRoot + "/Editor/UI/FolderRow.uxml";
 
-        // Tabs
-        private Button tabFolders, tabDeploy;
-        private VisualElement panelFolders, panelDeploy;
+        // ── UI elements (top → bottom, matching UXML) ─────────────────────────
 
-        // Folders tab
-        private Button refreshBtn, pullAllBtn, newFolderBtn, initBtn;
+        // Generation warning banner
+        private VisualElement genWarningBanner;
+        private Label         genWarningLabel;
+        private Button        bumpGenerationBtn, ackUnityVersionBtn;
+
+        // Top bar
+        private Button      refreshBtn, pullAllBtn, buildAllBtn;
+        private Button      uploadAllBtn, promoteAllBtn;
+        private ToolbarMenu moreAllMenu;
+
+        // New-folder row / setup banner
+        private Button        newFolderBtn, initBtn;
         private VisualElement setupBanner, newFolderRow;
-        private TextField newFolderField;
+        private TextField     newFolderField;
+
+        // Folder list
         private ScrollView folderList;
 
-        // Deploy tab (build + upload merged)
-        private VisualElement genWarningBanner;
-        private Label genWarningLabel, deployEmpty, deployLog, stackStatusLabel;
-        private Button bumpGenerationBtn, ackUnityVersionBtn, buildAllBtn, deployRefreshBtn;
-        private Button uploadAllBtn, promoteAllBtn, buildAndUploadAllBtn, deployLambdaBtn, teardownLambdaBtn;
-        private ScrollView deployList;
-        private ContentManifest stagingManifest;
-        private ContentManifest productionManifest;
+        // Infrastructure row
+        private Label  stackStatusLabel;
+        private Button deployLambdaBtn, teardownLambdaBtn;
+
+        // Log
+        private Label deployLog;
 
         // Status bar
         private VisualElement spinner;
-        private Label statusLabel;
+        private Label         statusLabel;
 
-        // State
-        private bool? isInitialized;
-        private bool newFolderRowVisible;
-        private List<string> remoteFolders = new();
-        private HashSet<string> repoFolders = new(StringComparer.OrdinalIgnoreCase); // folders that exist in the remote git repo
-        private List<string> checkedOutFolders = new();
-        private Dictionary<string, FolderStatus> folderStatuses = new();
+        // ── State ─────────────────────────────────────────────────────────────
+
+        private bool?          isInitialized;
+        private List<string>   remoteFolders    = new();
+        private HashSet<string> repoFolders     = new(StringComparer.OrdinalIgnoreCase);
+        private List<string>   checkedOutFolders = new();
+        private Dictionary<string, FolderStatus>       folderStatuses = new();
         private readonly Dictionary<string, Action<FolderStatus>> rowUpdaters = new();
         private VisualTreeAsset rowTemplate;
+        private ContentManifest stagingManifest;
+        private ContentManifest productionManifest;
         private bool busy;
         private bool polling;
-        private bool _projectChangedPending;
+        private bool projectChangedPending;
         private IVisualElementScheduledItem spinnerTick, statusPoller;
+
+        // ── Lifecycle ─────────────────────────────────────────────────────────
 
         [MenuItem("Window/Content Browser")]
         public static void ShowWindow()
         {
             var w = GetWindow<ContentRepoWindow>();
-            w.titleContent = new GUIContent("Content Browser");
+            w.titleContent = MakeTitleContent();
             w.minSize = new Vector2(580, 400);
         }
+
+        private static GUIContent MakeTitleContent() =>
+            new GUIContent("Content Browser", LoadIcon("monitor-cloud"));
 
         private void OnEnable()
         {
@@ -70,18 +85,17 @@ namespace ContentRepo.Editor
             var uss = AssetDatabase.LoadAssetAtPath<StyleSheet>(UssPath);
             if (uss != null) rootVisualElement.styleSheets.Add(uss);
 
-            rowTemplate = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(FolderRowUxmlPath);
+            titleContent = MakeTitleContent();
+            rowTemplate  = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(FolderRowUxmlPath);
             ResolveElements();
-            WireTabBar();
             WireFolderTab();
             WireDeployTab();
 
-            ContentGitApi.OnStateChanged += OnExternalStateChanged;
-            EditorApplication.projectChanged += OnProjectChanged;
+            ContentGitApi.OnStateChanged        += OnExternalStateChanged;
+            EditorApplication.projectChanged    += OnProjectChanged;
 
-            // Reset busy state so the initial load is never skipped when the window
-            // is re-enabled after exiting Play mode (no domain reload occurs, so
-            // the busy flag from any in-flight operation while in Play mode persists).
+            // Reset busy so the initial load is never skipped when re-enabled after
+            // exiting Play mode (no domain reload, so the flag can persist).
             busy = false;
             SetSpinnerVisible(false);
             SetStatus("Ready");
@@ -92,90 +106,79 @@ namespace ContentRepo.Editor
 
         private void OnDisable()
         {
-            ContentGitApi.OnStateChanged -= OnExternalStateChanged;
+            ContentGitApi.OnStateChanged     -= OnExternalStateChanged;
             EditorApplication.projectChanged -= OnProjectChanged;
-            spinnerTick?.Pause(); spinnerTick = null;
+            spinnerTick?.Pause();  spinnerTick  = null;
             statusPoller?.Pause(); statusPoller = null;
         }
 
+        // ── Setup ─────────────────────────────────────────────────────────────
+
         private void ResolveElements()
         {
-            tabFolders = Q<Button>("tab-folders"); tabDeploy = Q<Button>("tab-deploy");
-            panelFolders = Q<VisualElement>("panel-folders"); panelDeploy = Q<VisualElement>("panel-deploy");
+            // Generation warning banner
+            genWarningBanner  = Q<VisualElement>("gen-warning-banner");
+            genWarningLabel   = Q<Label>("gen-warning-label");
+            bumpGenerationBtn = Q<Button>("btn-bump-generation");
+            ackUnityVersionBtn = Q<Button>("btn-ack-unity-version");
 
-            refreshBtn = Q<Button>("btn-refresh"); pullAllBtn = Q<Button>("btn-pull-all");
-            newFolderBtn = Q<Button>("btn-new-folder"); initBtn = Q<Button>("btn-init");
-            setupBanner = Q<VisualElement>("setup-banner"); newFolderRow = Q<VisualElement>("new-folder-row");
-            newFolderField = Q<TextField>("new-folder-field"); folderList = Q<ScrollView>("folder-list-container");
+            // Top bar — buttons then their icon images, left to right
+            refreshBtn          = Q<Button>("btn-refresh");
+            Q<Image>("img-refresh").image   = LoadIcon("refresh-cw");
+            pullAllBtn          = Q<Button>("btn-pull-all");
+            Q<Image>("img-pull-all").image  = LoadIcon("folder-sync");
+            buildAllBtn         = Q<Button>("btn-build-all");
+            Q<Image>("img-build-all").image = LoadIcon("hammer");
+            uploadAllBtn        = Q<Button>("btn-upload-all");
+            Q<Image>("img-upload-all").image = LoadIcon("cloud-upload");
+            promoteAllBtn = Q<Button>("btn-promote-all");
+            moreAllMenu   = Q<ToolbarMenu>("btn-more-all");
 
-            genWarningBanner = Q<VisualElement>("gen-warning-banner"); genWarningLabel = Q<Label>("gen-warning-label");
-            bumpGenerationBtn = Q<Button>("btn-bump-generation"); ackUnityVersionBtn = Q<Button>("btn-ack-unity-version");
-            deployRefreshBtn = Q<Button>("btn-deploy-refresh");
-            buildAllBtn = Q<Button>("btn-build-all");
-            uploadAllBtn = Q<Button>("btn-upload-all");
-            promoteAllBtn = Q<Button>("btn-promote-all"); buildAndUploadAllBtn = Q<Button>("btn-more-all");
+            // New-folder row
+            newFolderBtn  = Q<Button>("btn-new-folder");
+            Q<Image>("img-new-folder").image = LoadIcon("plus");
 
-            Q<Image>("img-deploy-refresh").image = LoadIcon("refresh-cw");
-            Q<Image>("img-build-all").image      = LoadIcon("hammer");
-            Q<Image>("img-upload-all").image     = LoadIcon("cloud-upload");
-            deployList = Q<ScrollView>("deploy-list-container");
-            deployEmpty = Q<Label>("deploy-empty"); deployLog = Q<Label>("deploy-log");
+            // Setup banner
+            setupBanner   = Q<VisualElement>("setup-banner");
+            initBtn       = Q<Button>("btn-init");
+            newFolderRow  = Q<VisualElement>("new-folder-row");
+            newFolderField = Q<TextField>("new-folder-field");
+
+            // Folder list
+            folderList = Q<ScrollView>("folder-list-container");
+
+            // Infrastructure
             stackStatusLabel = Q<Label>("stack-status-label");
-            deployLambdaBtn = Q<Button>("btn-deploy-lambda"); teardownLambdaBtn = Q<Button>("btn-teardown-lambda");
-            spinner = Q<VisualElement>("progress-spinner"); statusLabel = Q<Label>("status-label");
+            deployLambdaBtn  = Q<Button>("btn-deploy-lambda");
+            teardownLambdaBtn = Q<Button>("btn-teardown-lambda");
+
+            // Log + status bar
+            deployLog   = Q<Label>("deploy-log");
+            spinner     = Q<VisualElement>("progress-spinner");
+            statusLabel = Q<Label>("status-label");
 
             newFolderRow.style.display = DisplayStyle.None;
-            setupBanner.style.display = DisplayStyle.None;
-
-            Q<Image>("img-new-folder").image = LoadIcon("plus");
-            Q<Image>("img-refresh").image = LoadIcon("refresh-cw");
-            Q<Image>("img-pull-all").image = LoadIcon("folder-sync");
+            setupBanner.style.display  = DisplayStyle.None;
         }
 
         private T Q<T>(string name) where T : VisualElement => rootVisualElement.Q<T>(name);
 
-        // ── Tab bar ───────────────────────────────────────────────────────────
-
-        private void WireTabBar()
-        {
-            tabFolders.clicked += () => SelectTab("folders");
-            tabDeploy.clicked += () => SelectTab("deploy");
-            SelectTab("folders");
-        }
-
-        private void SelectTab(string name)
-        {
-            panelFolders.style.display = name == "folders" ? DisplayStyle.Flex : DisplayStyle.None;
-            panelDeploy.style.display  = name == "deploy"  ? DisplayStyle.Flex : DisplayStyle.None;
-
-            foreach (var t in new[] { tabFolders, tabDeploy }) t.RemoveFromClassList("cs-tab--active");
-            switch (name)
-            {
-                case "folders": tabFolders.AddToClassList("cs-tab--active"); break;
-                case "deploy":
-                    tabDeploy.AddToClassList("cs-tab--active");
-                    RefreshGenerationWarning();
-                    RebuildDeployRows();
-                    _ = RefreshStackStatusAsync();
-                    break;
-            }
-        }
-
-        // ── Folders tab ───────────────────────────────────────────────────────
+        // ── Wiring ────────────────────────────────────────────────────────────
 
         private void WireFolderTab()
         {
-            refreshBtn.clicked += () => _ = RunAsync("Refreshing…", () => Task.CompletedTask);
+            refreshBtn.clicked += () => _ = RunAsync("Refreshing…", RefreshManifestsAsync);
             pullAllBtn.clicked += () => _ = RunAsync("Pulling all…", ContentGitApi.PullAllAsync);
-            initBtn.clicked += () => _ = RunAsync("Initializing…", ContentGitApi.InitAsync);
+            initBtn.clicked    += () => _ = RunAsync("Initializing…", ContentGitApi.InitAsync);
+
             var createFolderBtn = Q<Button>("btn-create-folder");
             var newFolderLabel  = Q<Label>("new-folder-label");
+
             void CollapseInput()
             {
-                newFolderRowVisible = false;
-                newFolderBtn.style.display   = DisplayStyle.Flex;
-                newFolderLabel.style.display = DisplayStyle.Flex;
-                newFolderField.style.display = DisplayStyle.None;
+                newFolderBtn.style.display    = DisplayStyle.Flex;
+                newFolderLabel.style.display  = DisplayStyle.Flex;
+                newFolderField.style.display  = DisplayStyle.None;
                 createFolderBtn.style.display = DisplayStyle.None;
                 newFolderField.SetValueWithoutNotify("");
             }
@@ -186,40 +189,37 @@ namespace ContentRepo.Editor
                 CollapseInput();
                 _ = RunAsync($"Creating '{name}'…", () => ContentGitApi.CreateFolderAsync(name));
             }
+
             newFolderBtn.clicked += () =>
             {
-                newFolderRowVisible = true;
-                newFolderBtn.style.display   = DisplayStyle.None;
-                newFolderLabel.style.display = DisplayStyle.None;
-                newFolderField.style.display = DisplayStyle.Flex;
+                newFolderBtn.style.display    = DisplayStyle.None;
+                newFolderLabel.style.display  = DisplayStyle.None;
+                newFolderField.style.display  = DisplayStyle.Flex;
                 createFolderBtn.style.display = DisplayStyle.Flex;
                 newFolderField.Focus();
             };
             createFolderBtn.clicked += () =>
             {
                 if (string.IsNullOrEmpty(newFolderField.value?.Trim()))
-                    { EditorUtility.DisplayDialog("Name required", "Enter a folder name.", "OK"); return; }
+                { EditorUtility.DisplayDialog("Name required", "Enter a folder name.", "OK"); return; }
                 ConfirmCreate();
             };
             newFolderField.RegisterCallback<KeyDownEvent>(evt =>
             {
                 if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
-                    { evt.StopPropagation(); ConfirmCreate(); }
+                { evt.StopPropagation(); ConfirmCreate(); }
                 else if (evt.keyCode == KeyCode.Escape)
-                    { evt.StopPropagation(); newFolderField.Blur(); CollapseInput(); }
+                { evt.StopPropagation(); newFolderField.Blur(); CollapseInput(); }
             }, TrickleDown.TrickleDown);
         }
-
-        // ── Deploy tab ────────────────────────────────────────────────────────
 
         private void WireDeployTab()
         {
             bumpGenerationBtn.clicked  += () => { ContentRepoGenerationSettings.instance.BumpGeneration();          RefreshGenerationWarning(); };
             ackUnityVersionBtn.clicked += () => { ContentRepoGenerationSettings.instance.AcknowledgeUnityVersion(); RefreshGenerationWarning(); };
-            deployRefreshBtn.clicked   += () => _ = RefreshManifestsAsync();
 
             buildAllBtn.clicked += () => _ = RunPipelineAsync("Building all…",
-                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog); RebuildDeployRows(); },
+                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog); Rebuild(); },
                 deployLog);
 
             uploadAllBtn.clicked += () => _ = RunPipelineAsync("Uploading all to staging…",
@@ -238,19 +238,16 @@ namespace ContentRepo.Editor
                     deployLog);
             };
 
-            buildAndUploadAllBtn.clicked += () =>
+            moreAllMenu.menu.AppendAction("Build and Deploy All", _ =>
             {
-                var menu = new GenericMenu();
-                menu.AddItem(new GUIContent("Build and Deploy All"), false, () =>
-                    _ = RunPipelineAsync("Build and Deploy All…",
-                        async () =>
-                        {
-                            await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog);
-                            await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog);
-                            await RefreshManifestsAsync();
-                        }, deployLog));
-                menu.DropDown(buildAndUploadAllBtn.worldBound);
-            };
+                var __ = RunPipelineAsync("Build and Deploy All…",
+                    async () =>
+                    {
+                        await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog);
+                        await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog);
+                        await RefreshManifestsAsync();
+                    }, deployLog);
+            });
 
             deployLambdaBtn.clicked += () => _ = RunPipelineAsync("Deploying cleanup Lambda…",
                 async () => { await ContentInfraApi.DeployCleanupLambdaAsync(AppendDeployLog); await RefreshStackStatusAsync(); },
@@ -265,35 +262,70 @@ namespace ContentRepo.Editor
             };
         }
 
-        private void RefreshGenerationWarning()
-        {
-            var gen = ContentRepoGenerationSettings.instance;
-            var change = gen.CheckUnityVersionChange();
-            if (change == ContentRepoGenerationSettings.VersionChangeKind.MinorOrMajor)
-            {
-                genWarningBanner.style.display = DisplayStyle.Flex;
-                genWarningLabel.text = $"Unity version changed from {gen.UnityVersionAtGeneration} to {Application.unityVersion}. " +
-                                       "Bundle format may be incompatible. Bump the generation before building.";
-                ackUnityVersionBtn.style.display = DisplayStyle.None;
-                bumpGenerationBtn.style.display = DisplayStyle.Flex;
-            }
-            else if (change == ContentRepoGenerationSettings.VersionChangeKind.PatchOnly)
-            {
-                genWarningBanner.style.display = DisplayStyle.Flex;
-                genWarningLabel.text = $"Unity patch version changed ({gen.UnityVersionAtGeneration} → {Application.unityVersion}). Bundles are likely compatible.";
-                ackUnityVersionBtn.style.display = DisplayStyle.Flex;
-                bumpGenerationBtn.style.display = DisplayStyle.None;
-            }
-            else
-            {
-                genWarningBanner.style.display = DisplayStyle.None;
-            }
-        }
+        // ── Data refresh ──────────────────────────────────────────────────────
 
-        private async Task RefreshStackStatusAsync()
+        private async Task RefreshDataAsync()
         {
-            try { stackStatusLabel.text = $"Stack: {await ContentInfraApi.GetStackStatusAsync()}"; }
-            catch { stackStatusLabel.text = "Stack: unknown"; }
+            isInitialized = await ContentGitApi.IsInitializedAsync();
+            remoteFolders.Clear(); repoFolders.Clear(); checkedOutFolders.Clear(); folderStatuses.Clear();
+            if (isInitialized != true) return;
+
+            try { remoteFolders = await ContentGitApi.GetRemoteFoldersAsync(); }
+            catch (Exception ex) { Debug.LogWarning($"Remote folders: {ex.Message}"); }
+            repoFolders = new HashSet<string>(remoteFolders, StringComparer.OrdinalIgnoreCase);
+
+            try { checkedOutFolders = await ContentGitApi.GetCheckedOutFoldersAsync(); }
+            catch (Exception ex) { Debug.LogWarning($"Checked-out folders: {ex.Message}"); }
+
+            var diskFolders = new List<string>();
+            try { diskFolders = await ContentGitApi.GetLocalFoldersOnDiskAsync(); }
+            catch (Exception ex) { Debug.LogWarning($"Disk folders: {ex.Message}"); }
+
+            var allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
+            MergeGroupsStatusInto(checkedOutFolders, allStatuses);
+
+            foreach (var f in checkedOutFolders)
+            {
+                var isOnRemote = remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase));
+                var isOnDisk   = diskFolders.Any(d => d.Equals(f, StringComparison.OrdinalIgnoreCase));
+                if (!isOnRemote && !isOnDisk)
+                {
+                    // Stale sparse-checkout entry — prune silently.
+                    try { await ContentGitApi.RemoveFolderFromSparseCheckoutAsync(f); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not prune stale sparse-checkout entry '{f}': {ex.Message}"); }
+                    Debug.Log($"[ContentRepo] Pruned stale sparse-checkout entry '{f}' — not on remote or disk.");
+                    continue;
+                }
+                if (!isOnRemote) remoteFolders.Add(f);
+                allStatuses.TryGetValue(f, out var s);
+                folderStatuses[f] = s;
+            }
+
+            foreach (var f in diskFolders)
+            {
+                if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase)))
+                {
+                    remoteFolders.Add(f);
+                    try { await ContentGitApi.EnsureFolderInSparseCheckoutAsync(f); } catch { /* best-effort */ }
+                }
+                if (!checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase)))
+                    checkedOutFolders.Add(f);
+                allStatuses.TryGetValue(f, out var s);
+                folderStatuses[f] = s;
+            }
+            remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
+
+            // Remove local-dev overrides for packages whose folder no longer exists on disk.
+            foreach (var pkg in ContentLocalDevOverrides.All.Keys.ToList())
+            {
+                if (!diskFolders.Any(f => f.Equals(pkg, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ContentLocalDevApi.ClearOverride(pkg);
+                    Debug.Log($"[ContentRepo] Cleared local dev override for '{pkg}' — folder no longer on disk.");
+                }
+            }
+
+            CleanupOrphanAddressableGroups(remoteFolders, diskFolders);
         }
 
         private async Task RefreshManifestsAsync()
@@ -305,9 +337,40 @@ namespace ContentRepo.Editor
                 productionManifest = await ContentUploadApi.GetManifestAsync(settings.ProductionPrefix);
             }
             catch { /* credentials not configured yet */ }
-            RebuildDeployRows();
+            _ = RefreshStackStatusAsync();
             if (!busy) Rebuild();
             UpdateToolbarVisibility();
+        }
+
+        private async Task RefreshStackStatusAsync()
+        {
+            try   { stackStatusLabel.text = $"Stack: {await ContentInfraApi.GetStackStatusAsync()}"; }
+            catch { stackStatusLabel.text = "Stack: unknown"; }
+        }
+
+        private void RefreshGenerationWarning()
+        {
+            var gen    = ContentRepoGenerationSettings.instance;
+            var change = gen.CheckUnityVersionChange();
+            if (change == ContentRepoGenerationSettings.VersionChangeKind.MinorOrMajor)
+            {
+                genWarningBanner.style.display   = DisplayStyle.Flex;
+                genWarningLabel.text             = $"Unity version changed from {gen.UnityVersionAtGeneration} to {Application.unityVersion}. " +
+                                                   "Bundle format may be incompatible. Bump the generation before building.";
+                ackUnityVersionBtn.style.display = DisplayStyle.None;
+                bumpGenerationBtn.style.display  = DisplayStyle.Flex;
+            }
+            else if (change == ContentRepoGenerationSettings.VersionChangeKind.PatchOnly)
+            {
+                genWarningBanner.style.display   = DisplayStyle.Flex;
+                genWarningLabel.text             = $"Unity patch version changed ({gen.UnityVersionAtGeneration} → {Application.unityVersion}). Bundles are likely compatible.";
+                ackUnityVersionBtn.style.display = DisplayStyle.Flex;
+                bumpGenerationBtn.style.display  = DisplayStyle.None;
+            }
+            else
+            {
+                genWarningBanner.style.display = DisplayStyle.None;
+            }
         }
 
         private void UpdateToolbarVisibility()
@@ -333,324 +396,111 @@ namespace ContentRepo.Editor
             promoteAllBtn.style.display = anyPromoteReady ? DisplayStyle.Flex : DisplayStyle.None;
         }
 
-        private string StagingKey() => ContentUploadSettings.instance.StagingPrefix;
+        // ── List building ─────────────────────────────────────────────────────
 
-        // ── Deploy rows ───────────────────────────────────────────────────────
-
-        private void RebuildDeployRows()
+        private void Rebuild()
         {
-            deployList.Clear();
+            setupBanner.style.display = isInitialized == false ? DisplayStyle.Flex : DisplayStyle.None;
+            rowUpdaters.Clear();
+            folderList.Clear();
+            if (isInitialized != true) return;
+
             var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
 
-            var local = checkedOutFolders.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
-            deployEmpty.style.display = local.Count == 0 ? DisplayStyle.Flex : DisplayStyle.None;
-            foreach (var pkg in local)
-                deployList.Add(BuildDeployRow(pkg, platform));
+            if (remoteFolders.Count == 0)
+                folderList.Add(new Label("No folders available.")
+                    { style = { unityFontStyleAndWeight = FontStyle.Italic, marginTop = 8, marginLeft = 8 } });
+            else
+                foreach (var folder in remoteFolders.Where(f => checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase))))
+                    folderList.Add(BuildRow(folder));
 
-            var remoteOnly = GetRemoteOnlyPackages().OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
-            if (remoteOnly.Count > 0)
+            newFolderRow.style.display = DisplayStyle.Flex;
+            folderList.Add(newFolderRow);
+
+            var nonCheckedOut = GetNonCheckedOutPackages().ToList();
+            if (nonCheckedOut.Count > 0)
             {
-                var divider = new Label("Not checked out locally") { style = { opacity = 0.45f, fontSize = 10, marginTop = 6, marginLeft = 8, marginBottom = 2 } };
-                deployList.Add(divider);
-                foreach (var pkg in remoteOnly)
-                    deployList.Add(BuildRemoteOnlyRow(pkg, platform));
+                folderList.Add(new Label("Not checked out locally")
+                    { style = { opacity = 0.45f, fontSize = 10, marginTop = 6, marginLeft = 8, marginBottom = 2 } });
+                foreach (var pkg in nonCheckedOut)
+                    folderList.Add(BuildNonCheckedOutRow(pkg, platform));
             }
         }
 
-        private IEnumerable<string> GetRemoteOnlyPackages()
+        private IEnumerable<string> GetNonCheckedOutPackages()
         {
-            var local  = new HashSet<string>(checkedOutFolders, StringComparer.OrdinalIgnoreCase);
-            var remote = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (stagingManifest    != null) foreach (var e in stagingManifest.contentPackages)    remote.Add(e.name);
-            if (productionManifest != null) foreach (var e in productionManifest.contentPackages) remote.Add(e.name);
-            return remote.Where(p => !local.Contains(p));
+            var local = new HashSet<string>(checkedOutFolders, StringComparer.OrdinalIgnoreCase);
+            var all   = new HashSet<string>(repoFolders,       StringComparer.OrdinalIgnoreCase);
+            if (stagingManifest    != null) foreach (var e in stagingManifest.contentPackages)    all.Add(e.name);
+            if (productionManifest != null) foreach (var e in productionManifest.contentPackages) all.Add(e.name);
+            return all.Where(p => !local.Contains(p)).OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
         }
 
-        private VisualElement BuildRemoteOnlyRow(string pkg, string platform)
+        private VisualElement BuildNonCheckedOutRow(string pkg, string platform)
         {
-            var row = new VisualElement(); row.AddToClassList("cs-pipeline-row"); row.AddToClassList("cs-pipeline-row--remote");
+            var row = new VisualElement();
+            row.AddToClassList("cs-pipeline-row");
+            row.AddToClassList("cs-pipeline-row--remote");
 
-            var nameLabel = new Label(pkg); nameLabel.AddToClassList("cs-pipeline-name"); row.Add(nameLabel);
+            var nameLabel = new Label(pkg);
+            nameLabel.AddToClassList("cs-pipeline-name");
+            row.Add(nameLabel);
 
             var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
             var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
 
-            // Warning: in production but removed from staging — next promote would leave prod out of sync
             if (stgId == null && prdId != null)
             {
-                var warn = new Label("⚠") { tooltip = "This package is in production but not in staging.\nUse 'Restore from production' to re-add it to staging." };
+                var warn = new Label("⚠")
+                    { tooltip = "This package is in production but not in staging.\nUse 'Restore from production' to re-add it to staging." };
                 warn.AddToClassList("cs-warn-icon");
                 row.Add(warn);
             }
 
             var stagingBadge = MakeLiveBadge("staging", stgId);
             if (stagingBadge != null) row.Add(stagingBadge);
-            var prodBadge = MakeProdBadge(prdId, false);
+            var prodBadge = MakeProdBadge(prdId, promoteReady: false);
             if (prodBadge != null) row.Add(prodBadge);
 
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
             var staging    = ContentUploadSettings.instance.StagingPrefix;
             var production = ContentUploadSettings.instance.ProductionPrefix;
-            var moreBtn = new Button { text = "⋮", tooltip = "More actions" };
+            var moreBtn    = new Button { text = "⋮", tooltip = "More actions" };
             moreBtn.AddToClassList("cs-icon-btn");
             moreBtn.AddToClassList("cs-icon-btn--lg");
             moreBtn.AddToClassList("cs-menu-btn");
             moreBtn.clicked += () =>
             {
                 var menu = new GenericMenu();
+                if (repoFolders.Contains(pkg))
+                    menu.AddItem(new GUIContent("Check out"), false,
+                        () => _ = RunAsync($"Checking out '{pkg}'…", () => ContentGitApi.CheckOutFolderAsync(pkg)));
                 if (prdId != null && prdId != stgId)
                     menu.AddItem(new GUIContent("Restore from production"), false, () =>
-                        _ = RunPipelineAsync($"Restoring '{pkg}' from production…",
+                        _ = RunPipelineAsync($"Restoring '{pkg}'…",
                             async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, production, staging, AppendDeployLog); await RefreshManifestsAsync(); },
                             deployLog));
                 if (stgId != null)
                     menu.AddItem(new GUIContent("Remove from Staging"), false, () =>
-                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
+                        _ = RunPipelineAsync($"Removing '{pkg}'…",
                             async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
                             deployLog));
-                if (prdId == null && stgId == null)
-                    menu.AddDisabledItem(new GUIContent("Nothing to restore"));
+                if (repoFolders.Contains(pkg))
+                {
+                    menu.AddItem(new GUIContent("Delete from repository"), false, () =>
+                    {
+                        if (EditorUtility.DisplayDialog("Delete remote",
+                            $"Permanently delete '{pkg}' from the remote?\nThis cannot be undone.", "Delete", "Cancel"))
+                            _ = RunAsync($"Deleting '{pkg}'…", () => ContentGitApi.DeleteRemoteFolderAsync(pkg));
+                    });
+                }
+                if (!repoFolders.Contains(pkg) && prdId == null && stgId == null)
+                    menu.AddDisabledItem(new GUIContent("Nothing to do"));
                 menu.DropDown(moreBtn.worldBound);
             };
             row.Add(moreBtn);
-
             return row;
-        }
-
-        private VisualElement BuildDeployRow(string pkg, string platform)
-        {
-            var row = new VisualElement(); row.AddToClassList("cs-pipeline-row");
-
-            // Name
-            var nameLabel = new Label(pkg); nameLabel.AddToClassList("cs-pipeline-name"); row.Add(nameLabel);
-
-            // Build meta label — prefer session timestamp, fall back to disk artifact info.
-            var buildTs   = ContentBuildApi.GetLastBuildTimestamp(pkg, platform);
-            var lastBuild = ContentBuildApi.GetLastBuildResult(pkg);
-            var localBuildId = lastBuild?.BuildId ?? ContentBuildApi.GetLatestBuildIdFromDisk(pkg, platform);
-            var buildMetaText = buildTs.HasValue
-                ? $"built {buildTs.Value.ToLocalTime():MM-dd HH:mm}" + (lastBuild != null ? $" · {lastBuild.BuildId[..8]}" : "")
-                : localBuildId != null
-                    ? $"local: {localBuildId[..Math.Min(8, localBuildId.Length)]}"
-                    : null;
-            if (buildMetaText != null)
-            {
-                var buildMeta = new Label(buildMetaText); buildMeta.AddToClassList("cs-build-meta");
-                row.Add(buildMeta);
-            }
-
-            // Staging / production live badges
-            var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
-            var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
-            var promoteReady = stgId != null && stgId != prdId;
-            if (stagingManifest != null || productionManifest != null)
-            {
-                var stagBadge = MakeLiveBadge("staging", stgId);
-                if (stagBadge != null) row.Add(stagBadge);
-                var prodBadge2 = MakeProdBadge(prdId, promoteReady);
-                if (prodBadge2 != null) row.Add(prodBadge2);
-            }
-
-            // Local dev badge — visible at a glance when an override is active for this package.
-            var devOverrideActive = ContentLocalDevOverrides.TryGet(pkg, out var devBadgeEntry);
-            if (devOverrideActive)
-            {
-                var devBadgeText = devBadgeEntry.Mode == LocalDevMode.AssetDatabase ? "local: AssetDB" : "local: bundles";
-                var devBadge = MakeBadge(devBadgeText, "cs-badge--local-dev",
-                    devBadgeEntry.Mode == LocalDevMode.AssetDatabase
-                        ? "Assets are served from AssetDatabase (Fast Mode). CDN bypassed for this package."
-                        : "Bundles are served from local disk. CDN bypassed for this package.");
-                row.Add(devBadge);
-            }
-
-            // Status + spacer — only added when a pipeline operation is running; starts hidden.
-            var status = new Label(); status.AddToClassList("cs-pipeline-status"); status.AddToClassList("cs-pipeline-status--idle");
-            status.style.display = DisplayStyle.None;
-            row.Add(status);
-            row.Add(new VisualElement { style = { flexGrow = 1 } });
-
-            // Build
-            AddIconBtn(row, "hammer", $"Build '{pkg}'", () => _ = RunPipelineAsync($"Building '{pkg}'…",
-                async () =>
-                {
-                    SetPipelineStatus(status, "running");
-                    try { await ContentBuildApi.BuildContentPackageAsync(pkg, AppendDeployLog); SetPipelineStatus(status, "ok"); RebuildDeployRows(); }
-                    catch { SetPipelineStatus(status, "err"); throw; }
-                }, deployLog));
-
-            // Upload — shown whenever there is a local build artifact that differs from staging.
-            // Intentionally does NOT require a session timestamp so it works after Unity restarts
-            // or when artifacts were produced by CI and copied locally.
-            var showUpload = localBuildId != null && localBuildId != stgId;
-            var uploadBtn = AddIconBtn(row, "cloud-upload", $"Upload '{pkg}' to staging", () => _ = RunPipelineAsync($"Uploading '{pkg}'…",
-                async () =>
-                {
-                    SetPipelineStatus(status, "running");
-                    try { await ContentUploadApi.UploadContentPackageAsync(pkg, StagingKey(), log: AppendDeployLog); SetPipelineStatus(status, "ok"); }
-                    catch { SetPipelineStatus(status, "err"); throw; }
-                    finally { await RefreshManifestsAsync(); }
-                }, deployLog));
-            uploadBtn.style.display = showUpload ? DisplayStyle.Flex : DisplayStyle.None;
-
-            var staging    = ContentUploadSettings.instance.StagingPrefix;
-            var production = ContentUploadSettings.instance.ProductionPrefix;
-
-            // Promote → production text button (only when staging is ahead of production)
-            var promoteBtn = new Button(() =>
-            {
-                if (!EditorUtility.DisplayDialog("Promote", $"Promote '{pkg}' from {staging} → {production}?", "Promote", "Cancel")) return;
-                _ = RunPipelineAsync($"Promoting '{pkg}'…",
-                    async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
-                    deployLog);
-            }) { text = "→ production" };
-            promoteBtn.AddToClassList("cs-text-btn");
-            promoteBtn.AddToClassList("cs-promote-btn");
-            promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
-            row.Add(promoteBtn);
-
-            // ⋮ menu (last) — overflow actions
-            var moreBtn = new Button { text = "⋮", tooltip = "More actions" };
-            moreBtn.AddToClassList("cs-icon-btn");
-            moreBtn.AddToClassList("cs-icon-btn--lg");
-            moreBtn.AddToClassList("cs-menu-btn");
-            moreBtn.clicked += () =>
-            {
-                var menu = new GenericMenu();
-                menu.AddItem(new GUIContent("Build and Deploy"), false, () =>
-                    _ = RunPipelineAsync($"Build and Deploy '{pkg}'…",
-                        async () =>
-                        {
-                            SetPipelineStatus(status, "running");
-                            try
-                            {
-                                await ContentBuildApi.BuildContentPackageAsync(pkg, AppendDeployLog);
-                                await ContentUploadApi.UploadContentPackageAsync(pkg, StagingKey(), log: AppendDeployLog);
-                                SetPipelineStatus(status, "ok");
-                            }
-                            catch { SetPipelineStatus(status, "err"); throw; }
-                            finally { await RefreshManifestsAsync(); }
-                        }, deployLog));
-                if (prdId != null && prdId != stgId)
-                    menu.AddItem(new GUIContent("Restore from production"), false, () =>
-                        _ = RunPipelineAsync($"Restoring '{pkg}' from production…",
-                            async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, production, staging, AppendDeployLog); await RefreshManifestsAsync(); },
-                            deployLog));
-                if (stgId != null)
-                    menu.AddItem(new GUIContent("Remove from Staging"), false, () =>
-                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
-                            async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
-                            deployLog));
-
-                // ── Local dev overrides ──────────────────────────────────────
-                menu.AddSeparator("");
-                var isAssetDb      = ContentLocalDevOverrides.TryGet(pkg, out var devEntry)
-                                     && devEntry.Mode == LocalDevMode.AssetDatabase;
-                var isLocalBundles = ContentLocalDevOverrides.TryGet(pkg, out devEntry)
-                                     && devEntry.Mode == LocalDevMode.LocalBundles;
-
-                // AssetDatabase (Fast Mode)
-                if (!isAssetDb)
-                    menu.AddItem(new GUIContent("Local Dev / Use Asset Database (Fast Mode)"), false, () =>
-                    {
-                        try   { ContentLocalDevApi.SetupForFastMode(pkg, AppendDeployLog); RebuildDeployRows(); }
-                        catch (Exception ex) { AppendDeployLog($"ERROR: {ex.Message}"); Debug.LogException(ex); }
-                    });
-                else
-                    menu.AddItem(new GUIContent("\u2713 Local Dev: Asset Database active — Clear"), false, () =>
-                    {
-                        ContentLocalDevApi.ClearFastMode(pkg, AppendDeployLog);
-                        RebuildDeployRows();
-                    });
-
-                // Local Bundles (Build + Use Existing Build)
-                if (!isLocalBundles)
-                    menu.AddItem(new GUIContent("Local Dev / Build and Use Local Bundles"), false, () =>
-                        _ = RunPipelineAsync($"Build & register local bundles for '{pkg}'\u2026",
-                            async () =>
-                            {
-                                SetPipelineStatus(status, "running");
-                                try   { await ContentLocalDevApi.BuildAndRegisterLocalBundlesAsync(pkg, AppendDeployLog); SetPipelineStatus(status, "ok"); }
-                                catch { SetPipelineStatus(status, "err"); throw; }
-                                finally { RebuildDeployRows(); }
-                            }, deployLog));
-                else
-                    menu.AddItem(new GUIContent("\u2713 Local Dev: Local Bundles active — Clear"), false, () =>
-                    {
-                        ContentLocalDevApi.ClearLocalBundles(pkg, AppendDeployLog);
-                        RebuildDeployRows();
-                    });
-
-                menu.DropDown(moreBtn.worldBound);
-            };
-            row.Add(moreBtn);
-
-            return row;
-        }
-
-        private static void AddBtn(VisualElement row, string text, string name, Action clicked)
-        {
-            var btn = new Button(clicked) { text = text, name = name };
-            btn.AddToClassList("cs-text-btn");
-            row.Add(btn);
-        }
-
-        private static Button AddIconBtn(VisualElement parent, string iconName, string tooltip, Action clicked)
-        {
-            var btn = new Button(clicked) { tooltip = tooltip };
-            btn.AddToClassList("cs-icon-btn");
-            var img = new Image { image = LoadIcon(iconName), pickingMode = PickingMode.Ignore };
-            img.AddToClassList("cs-icon-image");
-            btn.Add(img);
-            parent.Add(btn);
-            return btn;
-        }
-
-        private static void SetPipelineStatus(Label status, string state)
-        {
-            status.RemoveFromClassList("cs-pipeline-status--idle");
-            status.RemoveFromClassList("cs-pipeline-status--ok");
-            status.RemoveFromClassList("cs-pipeline-status--err");
-            status.RemoveFromClassList("cs-pipeline-status--running");
-            switch (state)
-            {
-                case "ok":
-                    status.text = "ok";
-                    status.AddToClassList("cs-pipeline-status--ok");
-                    status.style.display = DisplayStyle.Flex;
-                    break;
-                case "err":
-                    status.text = "error";
-                    status.AddToClassList("cs-pipeline-status--err");
-                    status.style.display = DisplayStyle.Flex;
-                    break;
-                case "running":
-                    status.text = "running";
-                    status.AddToClassList("cs-pipeline-status--running");
-                    status.style.display = DisplayStyle.Flex;
-                    break;
-                default:
-                    // "idle" is the reset state — hide the label so it takes no space.
-                    status.text = string.Empty;
-                    status.AddToClassList("cs-pipeline-status--idle");
-                    status.style.display = DisplayStyle.None;
-                    break;
-            }
-        }
-
-        // ── Folder rows (Folders tab) ─────────────────────────────────────────
-
-        private void Rebuild()
-        {
-            setupBanner.style.display = isInitialized == false ? DisplayStyle.Flex : DisplayStyle.None;
-            rowUpdaters.Clear(); folderList.Clear();
-            if (isInitialized != true) return;
-            if (remoteFolders.Count == 0)
-                folderList.Add(new Label("No folders available.") { style = { unityFontStyleAndWeight = FontStyle.Italic, marginTop = 8, marginLeft = 8 } });
-            else
-                foreach (var folder in remoteFolders) folderList.Add(BuildRow(folder));
-            newFolderRow.style.display = DisplayStyle.Flex;
-            folderList.Add(newFolderRow);
         }
 
         private VisualElement BuildRow(string folder)
@@ -658,32 +508,33 @@ namespace ContentRepo.Editor
             var isCheckedOut = checkedOutFolders.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
             var isOnRemote   = repoFolders.Contains(folder);
             folderStatuses.TryGetValue(folder, out var status);
+
             var row = rowTemplate.CloneTree();
 
-            row.Q<Image>("img-pull").image       = LoadIcon("arrow-down-to-line");
-            row.Q<Image>("img-push").image       = LoadIcon("arrow-up-from-line");
+            // Icons — left to right as they appear in the row
             row.Q<Image>("img-checkout").image   = LoadIcon("folder-down");
             row.Q<Image>("img-disconnect").image = LoadIcon("x");
+            row.Q<Image>("img-pull").image       = LoadIcon("arrow-down-to-line");
+            row.Q<Image>("img-push").image       = LoadIcon("arrow-up-from-line");
 
-            var nameLabel   = row.Q<Label>("folder-name-label");
-            var renameField = row.Q<TextField>("folder-rename-field");
+            var nameLabel     = row.Q<Label>("folder-name-label");
+            var renameField   = row.Q<TextField>("folder-rename-field");
             var badge         = row.Q<VisualElement>("folder-badge-group");
-            var pullBtn       = row.Q<Button>("btn-pull");
-            var pushBtn       = row.Q<Button>("btn-push");
             var checkoutBtn   = row.Q<Button>("btn-checkout");
             var disconnectBtn = row.Q<Button>("btn-disconnect");
-            var moreBtn       = row.Q<Button>("btn-more");
             var expandBtn     = row.Q<Button>("btn-expand");
+            var pullBtn       = row.Q<Button>("btn-pull");
+            var pushBtn       = row.Q<Button>("btn-push");
+            var moreBtn       = row.Q<Button>("btn-more");
             var fileList      = row.Q<VisualElement>("file-list");
 
-            nameLabel.text = folder;
+            nameLabel.text            = folder;
             renameField.style.display = DisplayStyle.None;
             checkoutBtn.style.display = isCheckedOut ? DisplayStyle.None : DisplayStyle.Flex;
 
-            var expanded = false;
-            FolderStatus latestStatus = status;
+            var expanded     = false;
+            var latestStatus = status;
 
-            // per-row selection state: repoRoot-relative paths → their ChangeKind
             var selectedFiles = new Dictionary<string, ChangeKind>(StringComparer.OrdinalIgnoreCase);
             var entryElements = new Dictionary<string, VisualElement>(StringComparer.OrdinalIgnoreCase);
 
@@ -691,10 +542,8 @@ namespace ContentRepo.Editor
             {
                 foreach (var kv in entryElements)
                 {
-                    if (selectedFiles.ContainsKey(kv.Key))
-                        kv.Value.AddToClassList("cs-file-entry--selected");
-                    else
-                        kv.Value.RemoveFromClassList("cs-file-entry--selected");
+                    if (selectedFiles.ContainsKey(kv.Key)) kv.Value.AddToClassList("cs-file-entry--selected");
+                    else                                    kv.Value.RemoveFromClassList("cs-file-entry--selected");
                 }
             }
 
@@ -720,11 +569,11 @@ namespace ContentRepo.Editor
 
                 foreach (var fc in mainFiles)
                 {
-                    var pfx = folder + "/";
-                    var rel  = fc.Path.StartsWith(pfx, StringComparison.OrdinalIgnoreCase) ? fc.Path.Substring(pfx.Length) : fc.Path;
+                    var pfx       = folder + "/";
+                    var rel       = fc.Path.StartsWith(pfx, StringComparison.OrdinalIgnoreCase) ? fc.Path.Substring(pfx.Length) : fc.Path;
                     var assetPath = fc.Kind != ChangeKind.Deleted ? $"{localPath}/{fc.Path}" : null;
-                    var hasMeta = metaSet.Contains(fc.Path + ".meta");
-                    var entry = MakeFileEntry(rel, fc.Kind, fc.Path, assetPath, hasMeta);
+                    var hasMeta   = metaSet.Contains(fc.Path + ".meta");
+                    var entry     = MakeFileEntry(rel, fc.Kind, fc.Path, assetPath, hasMeta);
                     entryElements[fc.Path] = entry;
                     fileList.Add(entry);
                 }
@@ -735,9 +584,9 @@ namespace ContentRepo.Editor
             {
                 var entry = new VisualElement();
                 entry.AddToClassList("cs-file-entry");
-                entry.AddToClassList(kind == ChangeKind.Added ? "cs-file-entry--added"
-                    : kind == ChangeKind.Deleted ? "cs-file-entry--deleted"
-                    : "cs-file-entry--modified");
+                entry.AddToClassList(kind == ChangeKind.Added   ? "cs-file-entry--added"
+                                   : kind == ChangeKind.Deleted ? "cs-file-entry--deleted"
+                                                                 : "cs-file-entry--modified");
 
                 var sym = new Label(kind == ChangeKind.Added ? "+" : kind == ChangeKind.Deleted ? "−" : "~");
                 sym.AddToClassList("cs-file-prefix");
@@ -747,7 +596,8 @@ namespace ContentRepo.Editor
                 lbl.AddToClassList("cs-file-name");
                 lbl.pickingMode = PickingMode.Ignore;
 
-                entry.Add(sym); entry.Add(lbl);
+                entry.Add(sym);
+                entry.Add(lbl);
 
                 if (hasMeta)
                 {
@@ -757,16 +607,13 @@ namespace ContentRepo.Editor
                     entry.Add(metaTag);
                 }
 
-                // click to select / deselect
                 entry.RegisterCallback<ClickEvent>(evt =>
                 {
                     if (evt.button != 0) return;
                     var ctrl = evt.ctrlKey || evt.commandKey;
                     if (!ctrl) selectedFiles.Clear();
-                    if (selectedFiles.ContainsKey(repoPath))
-                        selectedFiles.Remove(repoPath);
-                    else
-                        selectedFiles[repoPath] = kind;
+                    if (selectedFiles.ContainsKey(repoPath)) selectedFiles.Remove(repoPath);
+                    else                                     selectedFiles[repoPath] = kind;
                     ApplySelectionStyles();
 
                     if (assetPath != null && !ctrl)
@@ -777,11 +624,10 @@ namespace ContentRepo.Editor
                     evt.StopPropagation();
                 });
 
-                // right-click context menu
                 entry.AddManipulator(new ContextualMenuManipulator(evt =>
                 {
-                    // right-clicking an unselected item selects it first
-                    if (!selectedFiles.ContainsKey(repoPath)) { selectedFiles.Clear(); selectedFiles[repoPath] = kind; ApplySelectionStyles(); }
+                    if (!selectedFiles.ContainsKey(repoPath))
+                    { selectedFiles.Clear(); selectedFiles[repoPath] = kind; ApplySelectionStyles(); }
 
                     var hasModified = selectedFiles.Values.Any(k => k != ChangeKind.Added);
                     var hasAdded    = selectedFiles.Values.Any(k => k == ChangeKind.Added);
@@ -789,33 +635,44 @@ namespace ContentRepo.Editor
                     var label       = count == 1 ? $"\"{displayName}\"" : $"{count} files";
 
                     if (hasModified)
-                        evt.menu.AppendAction($"Discard changes ({label})", _a =>
+                        evt.menu.AppendAction($"Discard changes ({label})", _ =>
                         {
                             var paths = selectedFiles.Keys.ToList();
                             var kinds = selectedFiles.Values.ToList();
-                            _ = RunAsync("Discarding changes…", () => ContentGitApi.DiscardFilesAsync(paths, kinds));
+                            var __ = RunAsync("Discarding changes…", () => ContentGitApi.DiscardFilesAsync(paths, kinds));
                         });
-
                     if (hasAdded)
-                        evt.menu.AppendAction($"Delete ({label})", _a =>
+                        evt.menu.AppendAction($"Delete ({label})", _ =>
                         {
                             if (!EditorUtility.DisplayDialog("Delete files", $"Permanently delete {label} from disk?", "Delete", "Cancel")) return;
                             var paths = selectedFiles.Where(p => p.Value == ChangeKind.Added).Select(p => p.Key).ToList();
-                            _ = RunAsync("Deleting files…", () => ContentGitApi.DeleteLocalFilesAsync(paths));
+                            var __ = RunAsync("Deleting files…", () => ContentGitApi.DeleteLocalFilesAsync(paths));
                         });
-
-                    evt.menu.AppendAction($"Commit and push ({label})…", _a => PromptAndCommit());
+                    evt.menu.AppendAction($"Commit and push ({label})…", _ => PromptAndCommit());
                 }));
 
                 return entry;
             }
 
+            var platform     = EditorUserBuildSettings.activeBuildTarget.ToString();
+            var stgId        = stagingManifest?.Find(folder)?.FindPlatform(platform)?.buildId;
+            var prdId        = productionManifest?.Find(folder)?.FindPlatform(platform)?.buildId;
+            var promoteReady = stgId != null && stgId != prdId;
+            var localBuildId = ContentBuildApi.GetLastBuildResult(folder)?.BuildId
+                            ?? ContentBuildApi.GetLatestBuildIdFromDisk(folder, platform);
 
             void UpdateRowState(FolderStatus s)
             {
                 latestStatus = s;
-                ApplyBadgeState(badge, isCheckedOut, s, folder);
-                var dirty = isCheckedOut && !s.IsClean;
+                ApplyBadgeState(badge, isCheckedOut, s);
+                if (stagingManifest != null || productionManifest != null)
+                {
+                    var stagBadge = MakeLiveBadge("staging", stgId);
+                    if (stagBadge != null) badge.Add(stagBadge);
+                    var prodBadge = MakeProdBadge(prdId, promoteReady);
+                    if (prodBadge != null) badge.Add(prodBadge);
+                }
+                var dirty               = isCheckedOut && !s.IsClean;
                 pullBtn.style.display       = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
                 pushBtn.style.display       = dirty ? DisplayStyle.Flex : DisplayStyle.None;
                 expandBtn.style.display     = dirty ? DisplayStyle.Flex : DisplayStyle.None;
@@ -823,80 +680,237 @@ namespace ContentRepo.Editor
                 if (!dirty && expanded) { expanded = false; expandBtn.text = "▶"; fileList.style.display = DisplayStyle.None; }
                 if (expanded) RebuildFileList();
             }
-            rowUpdaters[folder] = UpdateRowState; UpdateRowState(status);
+            rowUpdaters[folder] = UpdateRowState;
+            UpdateRowState(status);
 
+            // Button handlers — in visual left-to-right order
+            checkoutBtn.clicked   += () => _ = RunAsync($"Checking out '{folder}'…",  () => ContentGitApi.CheckOutFolderAsync(folder));
+            disconnectBtn.clicked += () =>
+            {
+                if (EditorUtility.DisplayDialog("Disconnect",
+                    $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel"))
+                    _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder));
+            };
             expandBtn.clicked += () =>
             {
-                expanded = !expanded;
-                expandBtn.text = expanded ? "▼" : "▶";
+                expanded           = !expanded;
+                expandBtn.text     = expanded ? "▼" : "▶";
                 fileList.style.display = expanded ? DisplayStyle.Flex : DisplayStyle.None;
                 if (expanded) RebuildFileList();
             };
-
-            var renameEditing = false;
-            void EnterRenameMode() { renameEditing = true; renameField.SetValueWithoutNotify(folder); nameLabel.style.display = DisplayStyle.None; renameField.style.display = DisplayStyle.Flex; renameField.Focus(); renameField.SelectAll(); }
-            void ExitRenameMode(bool commit) { renameEditing = false; nameLabel.style.display = DisplayStyle.Flex; renameField.style.display = DisplayStyle.None; if (!commit) return; var n = renameField.value?.Trim(); if (!string.IsNullOrEmpty(n) && n != folder) _ = RunAsync($"Renaming '{folder}'…", () => ContentGitApi.RenameFolderAsync(folder, n)); }
-
-            renameField.RegisterCallback<KeyDownEvent>(evt => { if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter) { evt.StopPropagation(); ExitRenameMode(true); } else if (evt.keyCode == KeyCode.Escape) { evt.StopPropagation(); ExitRenameMode(false); } });
-            checkoutBtn.clicked += () => _ = RunAsync($"Checking out '{folder}'…", () => ContentGitApi.CheckOutFolderAsync(folder));
-            disconnectBtn.clicked += () => { if (EditorUtility.DisplayDialog("Disconnect", $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel")) _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder)); };
             pullBtn.clicked += () => _ = RunAsync($"Pulling '{folder}'…", () => ContentGitApi.PullFolderAsync(folder));
+
+            void EnterRenameMode()
+            {
+                renameField.SetValueWithoutNotify(folder);
+                nameLabel.style.display   = DisplayStyle.None;
+                renameField.style.display = DisplayStyle.Flex;
+                renameField.Focus();
+                renameField.SelectAll();
+            }
+            void ExitRenameMode(bool commit)
+            {
+                nameLabel.style.display   = DisplayStyle.Flex;
+                renameField.style.display = DisplayStyle.None;
+                if (!commit) return;
+                var n = renameField.value?.Trim();
+                if (!string.IsNullOrEmpty(n) && n != folder)
+                    _ = RunAsync($"Renaming '{folder}'…", () => ContentGitApi.RenameFolderAsync(folder, n));
+            }
+            renameField.RegisterCallback<KeyDownEvent>(evt =>
+            {
+                if      (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter) { evt.StopPropagation(); ExitRenameMode(true);  }
+                else if (evt.keyCode == KeyCode.Escape)                                       { evt.StopPropagation(); ExitRenameMode(false); }
+            });
 
             void PromptAndCommit()
             {
-                var autoMsg   = $"Content Updates {folder}";
                 var pfx       = folder + "/";
                 var fileNames = (latestStatus.Files ?? new List<FileChange>())
                     .Select(f => f.Path.StartsWith(pfx, StringComparison.OrdinalIgnoreCase) ? f.Path.Substring(pfx.Length) : f.Path)
                     .ToList();
-                CommitConfirmWindow.Show(autoMsg, fileNames,
+                CommitConfirmWindow.Show($"Content Updates {folder}", fileNames,
                     msg => _ = RunAsync($"Committing '{folder}'…", () => ContentGitApi.CommitAndPushFolderAsync(folder, msg)));
             }
 
             pushBtn.clicked += () => PromptAndCommit();
+
             moreBtn.clicked += () =>
             {
                 var dirty = isCheckedOut && !latestStatus.IsClean;
-                var menu = new GenericMenu();
+                var menu  = new GenericMenu();
                 menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
                 if (dirty && isOnRemote)
                 {
-                    menu.AddSeparator("");
                     menu.AddItem(new GUIContent("Disconnect"), false, () =>
                     {
-                        if (EditorUtility.DisplayDialog("Disconnect", $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel"))
+                        if (EditorUtility.DisplayDialog("Disconnect",
+                            $"Remove '{folder}' from sparse-checkout?\nUncommitted changes will be lost.", "Disconnect", "Cancel"))
                             _ = RunAsync($"Disconnecting '{folder}'…", () => ContentGitApi.DisconnectFolderAsync(folder));
                     });
                 }
-                menu.AddSeparator("");
+                menu.AddItem(new GUIContent("Build and Deploy"), false, () =>
+                    _ = RunPipelineAsync($"Build and Deploy '{folder}'…",
+                        async () =>
+                        {
+                            var statusLbl = row.Q<Label>(null, "cs-pipeline-status");
+                            SetPipelineStatus(statusLbl, "running");
+                            try
+                            {
+                                await ContentBuildApi.BuildContentPackageAsync(folder, AppendDeployLog);
+                                await ContentUploadApi.UploadContentPackageAsync(folder, StagingKey(), log: AppendDeployLog);
+                                SetPipelineStatus(statusLbl, "ok");
+                            }
+                            catch { SetPipelineStatus(statusLbl, "err"); throw; }
+                            finally { await RefreshManifestsAsync(); }
+                        }, deployLog));
                 menu.AddItem(new GUIContent("Delete from repository"), false, () =>
                 {
-                    if (EditorUtility.DisplayDialog("Delete remote", $"Permanently delete '{folder}' from the remote?\nThis cannot be undone.", "Delete", "Cancel"))
+                    if (EditorUtility.DisplayDialog("Delete remote",
+                        $"Permanently delete '{folder}' from the remote?\nThis cannot be undone.", "Delete", "Cancel"))
                         _ = RunAsync($"Deleting '{folder}'…", () => ContentGitApi.DeleteRemoteFolderAsync(folder));
                 });
                 menu.DropDown(moreBtn.worldBound);
             };
 
+            // ── Integrated deploy buttons (inserted before ⋮) ─────────────────
+            var rowBody      = row.Q<VisualElement>("row-body");
+            var moreBtnIndex = rowBody.IndexOf(moreBtn);
+
+            var deployStatus = new Label();
+            deployStatus.AddToClassList("cs-pipeline-status");
+            deployStatus.AddToClassList("cs-pipeline-status--idle");
+            deployStatus.style.display = DisplayStyle.None;
+            rowBody.Insert(moreBtnIndex, deployStatus);
+
+            var buildBtn = new Button(() => _ = RunPipelineAsync($"Building '{folder}'…",
+                async () =>
+                {
+                    SetPipelineStatus(deployStatus, "running");
+                    try   { await ContentBuildApi.BuildContentPackageAsync(folder, AppendDeployLog); SetPipelineStatus(deployStatus, "ok"); Rebuild(); }
+                    catch { SetPipelineStatus(deployStatus, "err"); throw; }
+                }, deployLog));
+            buildBtn.AddToClassList("cs-icon-btn");
+            buildBtn.AddToClassList("cs-icon-btn--lg");
+            buildBtn.tooltip = $"Build '{folder}'";
+            var buildImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("hammer") };
+            buildImg.AddToClassList("cs-icon-image");
+            buildBtn.Add(buildImg);
+            rowBody.Insert(moreBtnIndex, buildBtn);
+
+            var uploadBtn = new Button(() => _ = RunPipelineAsync($"Uploading '{folder}'…",
+                async () =>
+                {
+                    SetPipelineStatus(deployStatus, "running");
+                    try   { await ContentUploadApi.UploadContentPackageAsync(folder, StagingKey(), log: AppendDeployLog); SetPipelineStatus(deployStatus, "ok"); }
+                    catch { SetPipelineStatus(deployStatus, "err"); throw; }
+                    finally { await RefreshManifestsAsync(); }
+                }, deployLog));
+            uploadBtn.AddToClassList("cs-icon-btn");
+            uploadBtn.AddToClassList("cs-icon-btn--lg");
+            uploadBtn.tooltip      = $"Upload '{folder}' to staging";
+            uploadBtn.style.display = localBuildId != null && localBuildId != stgId ? DisplayStyle.Flex : DisplayStyle.None;
+            var uploadImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("cloud-upload") };
+            uploadImg.AddToClassList("cs-icon-image");
+            uploadBtn.Add(uploadImg);
+            rowBody.Insert(moreBtnIndex, uploadBtn);
+
+            var staging2    = ContentUploadSettings.instance.StagingPrefix;
+            var production2 = ContentUploadSettings.instance.ProductionPrefix;
+            var promoteBtn  = new Button(() =>
+            {
+                if (!EditorUtility.DisplayDialog("Promote",
+                    $"Promote '{folder}' from {staging2} → {production2}?", "Promote", "Cancel")) return;
+                _ = RunPipelineAsync($"Promoting '{folder}'…",
+                    async () => { await ContentUploadApi.PromoteContentPackageAsync(folder, staging2, production2, AppendDeployLog); await RefreshManifestsAsync(); },
+                    deployLog);
+            }) { text = "→ prod" };
+            promoteBtn.AddToClassList("cs-text-btn");
+            promoteBtn.AddToClassList("cs-promote-btn");
+            promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
+            rowBody.Insert(moreBtnIndex, promoteBtn);
+
             return row;
         }
 
-        // ── Async orchestration ───────────────────────────────────────────────
+        // ── Row UI helpers ────────────────────────────────────────────────────
 
-        private void OnExternalStateChanged() => EditorApplication.delayCall += () => { if (this == null || busy) return; _ = RunAsync("Refreshing…", () => Task.CompletedTask); };
-
-        // Called by EditorApplication.projectChanged after every AssetDatabase refresh.
-        // We debounce with a single delayCall so rapid reimports only trigger one refresh.
-        private void OnProjectChanged()
+        private static void SetPipelineStatus(Label status, string state)
         {
-            if (_projectChangedPending) return;
-            _projectChangedPending = true;
-            EditorApplication.delayCall += () =>
+            if (status == null) return;
+            status.RemoveFromClassList("cs-pipeline-status--idle");
+            status.RemoveFromClassList("cs-pipeline-status--ok");
+            status.RemoveFromClassList("cs-pipeline-status--err");
+            status.RemoveFromClassList("cs-pipeline-status--running");
+            switch (state)
             {
-                _projectChangedPending = false;
-                if (this == null || busy) return;
-                _ = RunAsync("Refreshing…", () => Task.CompletedTask);
-            };
+                case "ok":
+                    status.text = "ok";      status.AddToClassList("cs-pipeline-status--ok");      status.style.display = DisplayStyle.Flex; break;
+                case "err":
+                    status.text = "error";   status.AddToClassList("cs-pipeline-status--err");     status.style.display = DisplayStyle.Flex; break;
+                case "running":
+                    status.text = "running"; status.AddToClassList("cs-pipeline-status--running"); status.style.display = DisplayStyle.Flex; break;
+                default:
+                    status.text = string.Empty; status.AddToClassList("cs-pipeline-status--idle"); status.style.display = DisplayStyle.None; break;
+            }
         }
+
+        private void ApplyBadgeState(VisualElement group, bool isCheckedOut, FolderStatus status)
+        {
+            group.Clear();
+            if (!isCheckedOut)
+                group.Add(MakeBadge("not checked out", "cs-badge--off"));
+            else if (status.IsClean)
+                group.Add(MakeBadge("clean", "cs-badge--on"));
+            else
+            {
+                if (status.Untracked > 0)                group.Add(MakeBadge($"+{status.Untracked}",               "cs-badge--new"));
+                if (status.Modified + status.Staged > 0) group.Add(MakeBadge($"{status.Modified + status.Staged}", "cs-badge--modified"));
+                if (status.Deleted > 0)                  group.Add(MakeBadge($"-{status.Deleted}",                 "cs-badge--deleted"));
+            }
+        }
+
+        private static Label MakeBadge(string text, string cls, string tooltip = null)
+        {
+            var l = new Label(text) { tooltip = tooltip };
+            l.AddToClassList("cs-badge");
+            l.AddToClassList(cls);
+            return l;
+        }
+
+        private static Label MakeLiveBadge(string env, string buildId)
+        {
+            if (buildId == null) return null;
+            var l = new Label($"{env}: {buildId[..Math.Min(8, buildId.Length)]}")
+                { tooltip = $"Live on {env}\n{buildId}" };
+            l.AddToClassList("cs-badge");
+            l.AddToClassList("cs-badge--stg");
+            return l;
+        }
+
+        private static Label MakeProdBadge(string prdId, bool promoteReady)
+        {
+            if (!promoteReady && prdId == null) return null;
+            string text, cls, tooltip;
+            if (promoteReady)
+            {
+                text    = "→ production ready";
+                cls     = "cs-badge--promote";
+                tooltip = $"Staging has a newer build — ready to promote\nProduction: {prdId ?? "none"}";
+            }
+            else
+            {
+                text    = $"production: {prdId![..Math.Min(8, prdId.Length)]}";
+                cls     = "cs-badge--prod";
+                tooltip = $"Live on production\n{prdId}";
+            }
+            var l = new Label(text) { tooltip = tooltip };
+            l.AddToClassList("cs-badge");
+            l.AddToClassList(cls);
+            return l;
+        }
+
+        // ── Async runners ─────────────────────────────────────────────────────
 
         private async Task RunAsync(string statusMessage, Func<Task> op)
         {
@@ -908,7 +922,9 @@ namespace ContentRepo.Editor
             try
             {
                 SetStatus("Refreshing…");
-                await RefreshDataAsync(); Rebuild(); RebuildDeployRows(); UpdateToolbarVisibility();
+                await RefreshDataAsync();
+                Rebuild();
+                UpdateToolbarVisibility();
                 SetStatus(!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready");
             }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); }
@@ -920,85 +936,113 @@ namespace ContentRepo.Editor
             if (busy) return;
             SetBusy(true, statusMessage);
             AppendLog(log, $"--- {statusMessage} ---");
-            try { await op(); SetStatus("Done."); }
+            try   { await op(); SetStatus("Done."); }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); AppendLog(log, $"ERROR: {ex.Message}"); Debug.LogException(ex); }
-            finally { RebuildDeployRows(); SetBusy(false); }
+            finally { Rebuild(); SetBusy(false); }
         }
 
-        private async Task RefreshDataAsync()
+        private async Task PollStatusesAsync()
         {
-            isInitialized = await ContentGitApi.IsInitializedAsync();
-            remoteFolders.Clear(); repoFolders.Clear(); checkedOutFolders.Clear(); folderStatuses.Clear();
-            if (isInitialized != true) return;
-
-            try { remoteFolders = await ContentGitApi.GetRemoteFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Remote folders: {ex.Message}"); }
-            repoFolders = new HashSet<string>(remoteFolders, StringComparer.OrdinalIgnoreCase);
-            try { checkedOutFolders = await ContentGitApi.GetCheckedOutFoldersAsync(); } catch (Exception ex) { Debug.LogWarning($"Checked-out folders: {ex.Message}"); }
-
-            // Also include any folder the developer created directly on disk (via Unity Project
-            // window or file explorer) that isn't on the remote or in sparse-checkout yet.
-            List<string> diskFolders = new List<string>();
-            try { diskFolders = await ContentGitApi.GetLocalFoldersOnDiskAsync(); } catch (Exception ex) { Debug.LogWarning($"Disk folders: {ex.Message}"); }
-
-            var allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
-            MergeGroupsStatusInto(checkedOutFolders, allStatuses);
-            foreach (var f in checkedOutFolders)
+            if (busy || isInitialized != true || checkedOutFolders.Count == 0 || polling) return;
+            polling = true;
+            try
             {
-                // If a folder is in the sparse-checkout list but no longer exists on disk
-                // and is not on the remote, it's a stale entry — prune it and hide it from UI.
-                var isOnRemote = remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase));
-                var isOnDisk   = diskFolders.Any(d => d.Equals(f, StringComparison.OrdinalIgnoreCase));
-                if (!isOnRemote && !isOnDisk)
+                var statuses = await ContentGitApi.GetAllFolderStatusesAsync();
+                MergeGroupsStatusInto(checkedOutFolders, statuses);
+                foreach (var kvp in rowUpdaters)
                 {
-                    try { await ContentGitApi.RemoveFolderFromSparseCheckoutAsync(f); }
-                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not prune stale sparse-checkout entry '{f}': {ex.Message}"); }
-                    Debug.Log($"[ContentRepo] Pruned stale sparse-checkout entry '{f}' — not on remote or disk.");
-                    continue;
-                }
-
-                if (!isOnRemote) remoteFolders.Add(f);
-                allStatuses.TryGetValue(f, out var s); folderStatuses[f] = s;
-            }
-            foreach (var f in diskFolders)
-            {
-                if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase)))
-                {
-                    remoteFolders.Add(f);
-                    // Also register in sparse-checkout so the folder is tracked in git.
-                    try { await ContentGitApi.EnsureFolderInSparseCheckoutAsync(f); } catch { /* best-effort */ }
-                }
-                if (!checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase)))
-                    checkedOutFolders.Add(f);
-                allStatuses.TryGetValue(f, out var s); folderStatuses[f] = s;
-            }
-            remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
-
-            // Clean up ContentLocalDevOverrides for packages whose local folder no longer exists
-            // on disk. This happens when a developer deletes the folder from the Project window
-            // or file explorer — the override should not persist after the assets are gone.
-            foreach (var pkg in ContentLocalDevOverrides.All.Keys.ToList())
-            {
-                if (!diskFolders.Any(f => f.Equals(pkg, StringComparison.OrdinalIgnoreCase)))
-                {
-                    ContentLocalDevApi.ClearOverride(pkg);
-                    Debug.Log($"[ContentRepo] Cleared local dev override for '{pkg}' — folder no longer on disk.");
+                    statuses.TryGetValue(kvp.Key, out var s);
+                    kvp.Value(s);
+                    if (checkedOutFolders.Any(c => c.Equals(kvp.Key, StringComparison.OrdinalIgnoreCase)))
+                        folderStatuses[kvp.Key] = s;
                 }
             }
-
-            // Clean up orphan Addressables groups in _groups/ whose content package no longer
-            // exists locally (on disk) or on the remote. Auto-generated groups are created by
-            // EnsureGroupPopulated / ContentGroupAutoSetup and should be removed together with
-            // the package folder so they don't clutter the Addressables Groups window.
-            CleanupOrphanAddressableGroups(remoteFolders, diskFolders);
+            catch (Exception ex) { Debug.LogWarning($"Status poll: {ex.Message}"); }
+            finally { polling = false; }
         }
 
-        /// <summary>
-        /// Deletes Addressables group assets from <c>_groups/</c> whose package name is not
-        /// present in either <paramref name="remoteFolders"/> (known on the remote) or
-        /// <paramref name="diskFolders"/> (present locally on disk).  These orphan groups are
-        /// auto-generated by <see cref="ContentLocalDevApi.EnsureGroupPopulated"/> /
-        /// <see cref="ContentGroupAutoSetup"/> and should be removed with the package.
-        /// </summary>
+        // ── Event handlers ────────────────────────────────────────────────────
+
+        private void OnExternalStateChanged() =>
+            EditorApplication.delayCall += () =>
+            {
+                if (this == null || busy) return;
+                _ = RunAsync("Refreshing…", () => Task.CompletedTask);
+            };
+
+        private void OnProjectChanged()
+        {
+            if (projectChangedPending) return;
+            projectChangedPending = true;
+            EditorApplication.delayCall += () =>
+            {
+                projectChangedPending = false;
+                if (this == null || busy) return;
+                _ = RunAsync("Refreshing…", () => Task.CompletedTask);
+            };
+        }
+
+        // ── Logging ───────────────────────────────────────────────────────────
+
+        private void AppendDeployLog(string line) => AppendLog(deployLog, line);
+
+        private void AppendLog(Label log, string line)
+        {
+            if (log == null) return;
+            EditorApplication.delayCall += () =>
+            {
+                if (log == null) return;
+                var t = log.text ?? "";
+                if (t.Length > 8000) t = t.Substring(t.Length - 6000);
+                log.text = t + line + "\n";
+            };
+        }
+
+        // ── Busy / spinner ────────────────────────────────────────────────────
+
+        private void SetBusy(bool b, string message = null)
+        {
+            busy = b;
+            SetSpinnerVisible(b);
+            SetButtonsEnabled(!b);
+            if (message != null) SetStatus(message);
+        }
+
+        private void SetSpinnerVisible(bool visible)
+        {
+            if (spinner == null) return;
+            if (visible)
+            {
+                spinner.AddToClassList("cs-spinner--visible");
+                if (spinnerTick == null)
+                {
+                    var angle = 0f;
+                    spinnerTick = spinner.schedule.Execute(() =>
+                    {
+                        angle = (angle + 30f) % 360f;
+                        spinner.style.rotate = new StyleRotate(new Rotate(new Angle(angle, AngleUnit.Degree)));
+                    }).Every(80);
+                }
+            }
+            else
+            {
+                spinner.RemoveFromClassList("cs-spinner--visible");
+                spinnerTick?.Pause();
+                spinnerTick = null;
+            }
+        }
+
+        private void SetButtonsEnabled(bool enabled) =>
+            rootVisualElement.Query<Button>().ForEach(b =>
+            {
+                if (b.name == "btn-new-folder") return;
+                b.SetEnabled(enabled);
+            });
+
+        private void SetStatus(string msg) { if (statusLabel != null) statusLabel.text = msg; }
+
+        // ── Static data helpers ───────────────────────────────────────────────
+
         private static void CleanupOrphanAddressableGroups(
             IReadOnlyList<string> remoteFolders,
             IReadOnlyList<string> diskFolders)
@@ -1006,41 +1050,40 @@ namespace ContentRepo.Editor
             var addressableSettings = UnityEditor.AddressableAssets.AddressableAssetSettingsDefaultObject.Settings;
             if (addressableSettings == null) return;
 
-            // Build a fast lookup of all known package names.
-            var known = new System.Collections.Generic.HashSet<string>(
-                remoteFolders.Concat(diskFolders),
-                StringComparer.OrdinalIgnoreCase);
+            var known = new HashSet<string>(remoteFolders.Concat(diskFolders), StringComparer.OrdinalIgnoreCase);
+            var groupsFolderSegment = $"/{ContentGitApi.GroupsFolderName}/";
 
-            // Collect groups to remove — never remove groups whose name is in the known set
-            // and never touch the default group or internal Addressables groups.
             var toRemove = addressableSettings.groups
-                .Where(g => g != null
-                         && !g.IsDefaultGroup()
-                         && !known.Contains(g.name))
+                .Where(g => g != null && !g.IsDefaultGroup() && !known.Contains(g.name))
                 .ToList();
 
             foreach (var group in toRemove)
             {
-                // Only remove if the group asset lives inside _groups/ — this avoids
-                // accidentally deleting manually-created groups that have nothing to do
-                // with ContentRepo.
-                var assetPath = UnityEditor.AssetDatabase.GetAssetPath(group);
+                var assetPath = AssetDatabase.GetAssetPath(group);
                 if (string.IsNullOrEmpty(assetPath)) continue;
-
-                var normalised = assetPath.Replace('\\', '/');
-                var groupsFolderSegment = $"/{ContentGitApi.GroupsFolderName}/";
-                if (!normalised.Contains(groupsFolderSegment)) continue;
-
+                if (!assetPath.Replace('\\', '/').Contains(groupsFolderSegment)) continue;
                 Debug.Log($"[ContentRepo] Removing orphan Addressables group '{group.name}' — package no longer exists.");
                 addressableSettings.RemoveGroup(group);
             }
 
-            if (toRemove.Any(g => g != null))
-                UnityEditor.AssetDatabase.SaveAssets();
+            var anyStale = false;
+            foreach (var group in addressableSettings.groups.ToList())
+            {
+                if (group == null || group.IsDefaultGroup()) continue;
+                var assetPath2 = AssetDatabase.GetAssetPath(group);
+                if (string.IsNullOrEmpty(assetPath2)) continue;
+                if (!assetPath2.Replace('\\', '/').Contains(groupsFolderSegment)) continue;
+                var stale = group.entries.Where(e => string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(e.guid))).ToList();
+                if (stale.Count == 0) continue;
+                foreach (var e in stale) group.RemoveAssetEntry(e, postEvent: false);
+                Debug.Log($"[ContentRepo] Removed {stale.Count} missing reference(s) from group '{group.name}'.");
+                anyStale = true;
+            }
+
+            if (toRemove.Any(g => g != null) || anyStale)
+                AssetDatabase.SaveAssets();
         }
 
-        // Distributes _groups/<GroupFile> status entries to the content package they belong to,
-        // so group file changes appear under their package row rather than as an orphan _groups entry.
         private static void MergeGroupsStatusInto(IReadOnlyList<string> packages, Dictionary<string, FolderStatus> statuses)
         {
             if (!statuses.TryGetValue(ContentGitApi.GroupsFolderName, out var groupsStatus) || groupsStatus.Files == null)
@@ -1070,145 +1113,20 @@ namespace ContentRepo.Editor
 
         private static string ExtractPackageFromGroupFile(string repoRelativePath)
         {
-            // Group files are named <PackageName>.asset — strip extensions to recover the name.
-            // Only files directly inside _groups/ are considered; ignore anything deeper.
             var parts = repoRelativePath.Replace('\\', '/').Split('/');
             if (parts.Length != 2 || !parts[0].Equals(ContentGitApi.GroupsFolderName, StringComparison.OrdinalIgnoreCase))
                 return null;
-
             var file = parts[1];
             if (file.EndsWith(".meta",  StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 5);
             if (file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 6);
             return string.IsNullOrEmpty(file) ? null : file;
         }
 
-        private void AppendDeployLog(string line) => AppendLog(deployLog, line);
+        // ── Utilities ─────────────────────────────────────────────────────────
 
-        private void AppendLog(Label log, string line)
-        {
-            if (log == null) return;
-            EditorApplication.delayCall += () =>
-            {
-                if (log == null) return;
-                var t = log.text ?? "";
-                if (t.Length > 8000) t = t.Substring(t.Length - 6000);
-                log.text = t + line + "\n";
-            };
-        }
+        private string StagingKey() => ContentUploadSettings.instance.StagingPrefix;
 
-        // ── Busy / spinner ────────────────────────────────────────────────────
-
-        private void SetBusy(bool b, string message = null)
-        {
-            busy = b; SetSpinnerVisible(b); SetButtonsEnabled(!b);
-            if (message != null) SetStatus(message);
-        }
-
-        private void SetSpinnerVisible(bool visible)
-        {
-            if (spinner == null) return;
-            if (visible)
-            {
-                spinner.AddToClassList("cs-spinner--visible");
-                if (spinnerTick == null) { var angle = 0f; spinnerTick = spinner.schedule.Execute(() => { angle = (angle + 30f) % 360f; spinner.style.rotate = new StyleRotate(new Rotate(new Angle(angle, AngleUnit.Degree))); }).Every(80); }
-            }
-            else { spinner.RemoveFromClassList("cs-spinner--visible"); spinnerTick?.Pause(); spinnerTick = null; }
-        }
-
-        private void SetButtonsEnabled(bool enabled) => rootVisualElement.Query<Button>().ForEach(b =>
-        {
-            if (b.name == "btn-new-folder" || b.name == "tab-folders" || b.name == "tab-build" || b.name == "tab-upload") return;
-            b.SetEnabled(enabled);
-        });
-
-        private async Task PollStatusesAsync()
-        {
-            if (busy || isInitialized != true || checkedOutFolders.Count == 0 || polling) return;
-            polling = true;
-            try
-            {
-                var statuses = await ContentGitApi.GetAllFolderStatusesAsync();
-                MergeGroupsStatusInto(checkedOutFolders, statuses);
-                foreach (var kvp in rowUpdaters) { statuses.TryGetValue(kvp.Key, out var s); kvp.Value(s); if (checkedOutFolders.Any(c => c.Equals(kvp.Key, StringComparison.OrdinalIgnoreCase))) folderStatuses[kvp.Key] = s; }
-            }
-            catch (Exception ex) { Debug.LogWarning($"Status poll: {ex.Message}"); }
-            finally { polling = false; }
-        }
-
-        private void ApplyBadgeState(VisualElement group, bool isCheckedOut, FolderStatus status, string pkg)
-        {
-            group.Clear();
-
-            // Git state
-            if (!isCheckedOut)
-                group.Add(MakeBadge("not checked out", "cs-badge--off"));
-            else if (status.IsClean)
-                group.Add(MakeBadge("clean", "cs-badge--on"));
-            else
-            {
-                if (status.Untracked > 0)                group.Add(MakeBadge($"+{status.Untracked}",               "cs-badge--new"));
-                if (status.Modified + status.Staged > 0) group.Add(MakeBadge($"{status.Modified + status.Staged}", "cs-badge--modified"));
-                if (status.Deleted > 0)                  group.Add(MakeBadge($"-{status.Deleted}",                 "cs-badge--deleted"));
-            }
-
-            // Deploy state — shown for all folders (checked out or not) when manifests are loaded
-            if (stagingManifest == null && productionManifest == null) return;
-            var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
-            var stgId = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
-            var prdId = productionManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
-            if (stgId == null && prdId == null) return;
-
-            var promoteReady = stgId != null && stgId != prdId;
-            if (stgId != null)
-                group.Add(MakeLiveBadge("staging", stgId));
-            var applyProdBadge = MakeProdBadge(prdId, promoteReady);
-            if (applyProdBadge != null) group.Add(applyProdBadge);
-        }
-
-        private static Label MakeBadge(string text, string cls, string tooltip = null)
-        {
-            var l = new Label(text) { tooltip = tooltip };
-            l.AddToClassList("cs-badge");
-            l.AddToClassList(cls);
-            return l;
-        }
-
-        // Returns null when buildId is null — callers must null-check before adding.
-        private static Label MakeLiveBadge(string env, string buildId)
-        {
-            if (buildId == null) return null;
-            var text    = $"{env}: {buildId[..Math.Min(8, buildId.Length)]}";
-            var tooltip = $"Live on {env}\n{buildId}";
-            var l = new Label(text) { tooltip = tooltip };
-            l.AddToClassList("cs-badge");
-            l.AddToClassList("cs-badge--stg");
-            return l;
-        }
-
-        // Returns null when there is nothing meaningful to show (no prdId, not promote-ready).
-        private static Label MakeProdBadge(string prdId, bool promoteReady)
-        {
-            if (!promoteReady && prdId == null) return null;
-            string text; string cls; string tooltip;
-            if (promoteReady)
-            {
-                text    = "→ production ready";
-                cls     = "cs-badge--promote";
-                tooltip = $"Staging has a newer build — ready to promote\nProduction: {prdId ?? "none"}";
-            }
-            else
-            {
-                text    = $"production: {prdId[..Math.Min(8, prdId.Length)]}";
-                cls     = "cs-badge--prod";
-                tooltip = $"Live on production\n{prdId}";
-            }
-            var l = new Label(text) { tooltip = tooltip };
-            l.AddToClassList("cs-badge");
-            l.AddToClassList(cls);
-            return l;
-        }
-
-        private void SetStatus(string msg) { if (statusLabel != null) statusLabel.text = msg; }
-        private static Texture2D LoadIcon(string name) => AssetDatabase.LoadAssetAtPath<Texture2D>($"{PackageRoot}/Editor/UI/Icons/{name}.png");
+        private static Texture2D LoadIcon(string name) =>
+            AssetDatabase.LoadAssetAtPath<Texture2D>($"{PackageRoot}/Editor/UI/Icons/{name}.png");
     }
 }
