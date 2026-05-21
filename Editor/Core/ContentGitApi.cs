@@ -919,8 +919,8 @@ namespace ContentRepo.Editor
         {
             if (string.IsNullOrWhiteSpace(folder))
                 throw new ArgumentException("Folder name cannot be empty.", nameof(folder));
-            if (folder.Contains("..") || folder.IndexOfAny(new[] { '\n', '\r', '\0' }) >= 0)
-                throw new ArgumentException("Invalid folder name.", nameof(folder));
+            if (folder.Contains("..") || folder.IndexOfAny(new[] { '\n', '\r', '\0', ' ', '"', '/', '\\' }) >= 0)
+                throw new ArgumentException("Invalid folder name. Use only letters, digits, hyphens and underscores.", nameof(folder));
         }
 
         private static void NotifyChange()
