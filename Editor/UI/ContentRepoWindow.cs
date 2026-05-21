@@ -135,6 +135,12 @@ namespace ContentRepo.Editor
             Q<Image>("img-promote-all").image = LoadIcon("rocket");
             moreAllMenu   = Q<ToolbarMenu>("btn-more-all");
 
+            // Hidden until data confirms they are relevant
+            pullAllBtn.style.display    = DisplayStyle.None;
+            buildAllBtn.style.display   = DisplayStyle.None;
+            uploadAllBtn.style.display  = DisplayStyle.None;
+            promoteAllBtn.style.display = DisplayStyle.None;
+
             // New-folder row
             newFolderBtn  = Q<Button>("btn-new-folder");
             Q<Image>("img-new-folder").image = LoadIcon("plus");
@@ -379,6 +385,11 @@ namespace ContentRepo.Editor
             if (uploadAllBtn == null || promoteAllBtn == null) return;
             var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
 
+            pullAllBtn.style.display  = checkedOutFolders.Any(f => repoFolders.Contains(f))
+                ? DisplayStyle.Flex : DisplayStyle.None;
+            buildAllBtn.style.display = checkedOutFolders.Count > 0
+                ? DisplayStyle.Flex : DisplayStyle.None;
+
             var anyUploadNeeded = checkedOutFolders.Any(pkg =>
             {
                 var stgId        = stagingManifest?.Find(pkg)?.FindPlatform(platform)?.buildId;
@@ -470,15 +481,36 @@ namespace ContentRepo.Editor
                 row.Add(warn);
             }
 
+            var promoteReady = stgId != null && stgId != prdId;
+
             var stagingBadge = MakeLiveBadge("staging", stgId);
             if (stagingBadge != null) row.Add(stagingBadge);
-            var prodBadge = MakeProdBadge(prdId, promoteReady: false);
+            var prodBadge = MakeProdBadge(prdId);
             if (prodBadge != null) row.Add(prodBadge);
 
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
             var staging    = ContentUploadSettings.instance.StagingPrefix;
             var production = ContentUploadSettings.instance.ProductionPrefix;
+
+            if (promoteReady)
+            {
+                var promoteBtn = new Button(() =>
+                {
+                    if (EditorUtility.DisplayDialog("Promote",
+                        $"Promote '{pkg}' from {staging} → {production}?", "Promote", "Cancel"))
+                        _ = RunPipelineAsync($"Promoting '{pkg}'…",
+                            async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
+                            deployLog);
+                });
+                promoteBtn.AddToClassList("cs-icon-btn");
+                promoteBtn.AddToClassList("cs-icon-btn--muted");
+                promoteBtn.tooltip = $"Promote '{pkg}' to production\n{stgId}";
+                var promoteImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("rocket") };
+                promoteImg.AddToClassList("cs-icon-image");
+                promoteBtn.Add(promoteImg);
+                row.Add(promoteBtn);
+            }
             var moreBtn    = new Button { text = "⋮", tooltip = "More actions" };
             moreBtn.AddToClassList("cs-icon-btn");
             moreBtn.AddToClassList("cs-icon-btn--lg");
@@ -492,10 +524,19 @@ namespace ContentRepo.Editor
                             async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, production, staging, AppendDeployLog); await RefreshManifestsAsync(); },
                             deployLog));
                 if (stgId != null)
-                    menu.AddItem(new GUIContent("Remove from Staging"), false, () =>
-                        _ = RunPipelineAsync($"Removing '{pkg}'…",
+                    menu.AddItem(new GUIContent("Remove from staging"), false, () =>
+                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
                             async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
                             deployLog));
+                if (prdId != null)
+                    menu.AddItem(new GUIContent("Remove from production"), false, () =>
+                    {
+                        if (EditorUtility.DisplayDialog("Remove from production",
+                            $"Remove '{pkg}' from the production manifest?\nThis does not delete any files.", "Remove", "Cancel"))
+                            _ = RunPipelineAsync($"Removing '{pkg}' from production…",
+                                async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, production, AppendDeployLog); await RefreshManifestsAsync(); },
+                                deployLog);
+                    });
                 if (repoFolders.Contains(pkg))
                 {
                     menu.AddItem(new GUIContent("Delete from repository"), false, () =>
@@ -679,7 +720,7 @@ namespace ContentRepo.Editor
                 {
                     var stagBadge = MakeLiveBadge("staging", stgId);
                     if (stagBadge != null) badge.Add(stagBadge);
-                    var prodBadge = MakeProdBadge(prdId, promoteReady);
+                    var prodBadge = MakeProdBadge(prdId);
                     if (prodBadge != null) badge.Add(prodBadge);
                 }
                 var dirty               = isCheckedOut && !s.IsClean;
@@ -774,6 +815,20 @@ namespace ContentRepo.Editor
                             catch { SetPipelineStatus(statusLbl, "err"); throw; }
                             finally { await RefreshManifestsAsync(); }
                         }, deployLog));
+                var production3 = ContentUploadSettings.instance.ProductionPrefix;
+                if (prdId != null)
+                {
+                    menu.AddSeparator("");
+                    menu.AddItem(new GUIContent("Remove from production"), false, () =>
+                    {
+                        if (EditorUtility.DisplayDialog("Remove from production",
+                            $"Remove '{folder}' from the production manifest?\nThis does not delete any files.", "Remove", "Cancel"))
+                            _ = RunPipelineAsync($"Removing '{folder}' from production…",
+                                async () => { await ContentUploadApi.RemoveFromManifestAsync(folder, production3, AppendDeployLog); await RefreshManifestsAsync(); },
+                                deployLog);
+                    });
+                }
+                menu.AddSeparator("");
                 menu.AddItem(new GUIContent("Delete from repository"), false, () =>
                 {
                     if (EditorUtility.DisplayDialog("Delete remote",
@@ -807,7 +862,7 @@ namespace ContentRepo.Editor
             });
             promoteBtn.AddToClassList("cs-icon-btn");
             promoteBtn.AddToClassList("cs-icon-btn--lg");
-            promoteBtn.tooltip = $"Promote '{folder}' to production";
+            promoteBtn.tooltip = $"Promote '{folder}' to production\n{stgId}";
             promoteBtn.style.display = promoteReady ? DisplayStyle.Flex : DisplayStyle.None;
             var promoteImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("rocket") };
             promoteImg.AddToClassList("cs-icon-image");
@@ -904,25 +959,13 @@ namespace ContentRepo.Editor
             return l;
         }
 
-        private static Label MakeProdBadge(string prdId, bool promoteReady)
+        private static Label MakeProdBadge(string prdId)
         {
-            if (!promoteReady && prdId == null) return null;
-            string text, cls, tooltip;
-            if (promoteReady)
-            {
-                text    = "→ production ready";
-                cls     = "cs-badge--promote";
-                tooltip = $"Staging has a newer build — ready to promote\nProduction: {prdId ?? "none"}";
-            }
-            else
-            {
-                text    = $"production: {prdId![..Math.Min(8, prdId.Length)]}";
-                cls     = "cs-badge--prod";
-                tooltip = $"Live on production\n{prdId}";
-            }
-            var l = new Label(text) { tooltip = tooltip };
+            if (prdId == null) return null;
+            var l = new Label($"production: {prdId[..Math.Min(8, prdId.Length)]}")
+                { tooltip = $"Live on production\n{prdId}" };
             l.AddToClassList("cs-badge");
-            l.AddToClassList(cls);
+            l.AddToClassList("cs-badge--prod");
             return l;
         }
 
