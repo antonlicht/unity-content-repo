@@ -1,4 +1,4 @@
-﻿# Content Repo
+# Content Repo
 
 Unity editor tooling for managing a shared content repository via git sparse-checkout, plus an
 Addressables build, CDN upload, and local-dev-override pipeline.
@@ -20,51 +20,83 @@ Or add via **Window > Package Manager** using a git URL.
 
 ## Initial Setup
 
-1. Open **Project Settings > Content Repo** and configure:
-   - **Local path** — path inside the project where the content repository will live (e.g. `Assets/Content`).
-   - **Remote URL** — the git remote of the content repository.
-   - **Default branch** — the branch to track (e.g. `main`).
-   - **Upload** sub-section — S3 bucket, region, CloudFront distribution ID, CDN domain, and AWS credentials.
-2. Commit `ProjectSettings/ContentRepo.asset` so the whole team shares the settings.
-3. Open **Tools > Content Browser**, then click **Initialize** to clone the content repository.
+1. Open **Project Settings > Content Repo** and configure the three sub-pages:
+   - **Content Repo** — **Local path** (where the content repository lives, e.g. `Assets/Content`),
+     **Remote URL** (the git remote of the content repository), and **Branch** (the branch to track,
+     e.g. `main`).
+   - **Content Repo > Build** — Addressables profile name, remote load/build path variable names,
+     build output root, and the **Generation** string (default `gen/1`; see
+     [Generations](#generations)).
+   - **Content Repo > Upload** — S3 bucket, region, CloudFront distribution ID, CDN domain, the
+     staging/production environment prefixes, and AWS credentials.
+2. Commit `ProjectSettings/ContentRepo.asset`, `ContentRepoBuild.asset`, `ContentRepoGeneration.asset`,
+   and `ContentRepoUpload.asset` so the whole team shares the settings.
+3. Open **Window > Content Browser** (or click the cloud icon in the main editor toolbar), then click
+   **Initialize** to clone the content repository.
 4. Follow **[Documentation/Setup-AWS.md](Documentation/Setup-AWS.md)** to set up the CDN infrastructure.
 
 ---
 
 ## Daily Workflow
 
-Open **Tools > Content Browser**. Two tabs are available:
+Open **Window > Content Browser** (or the cloud icon in the main toolbar). Everything lives in one
+window:
 
-### Repository tab
+- A top **toolbar** of bulk actions — Refresh, Pull all, Build all, Upload all, Promote all, and a
+  ⋮ "More actions" menu. Each bulk button is hidden until it is relevant.
+- A **new-package** row (the `+` icon) for creating a package folder.
+- The **package list**. Each row combines git state and deploy actions.
+- An **Infrastructure** section (deploy/teardown of the cleanup Lambda) and a **Log** pane.
 
-Lists every top-level folder in the content repository's remote HEAD. Per folder:
+Per-package row actions:
 
 | Action | How |
 |---|---|
-| Check out | Click the folder row |
-| Pull latest | `↓` icon (visible when behind remote) |
-| Commit & Push | `↑` icon → inline message field |
-| Rename | `✎` icon |
-| Disconnect | Remove from sparse-checkout + delete local files |
-| Delete remote | `🗑` icon |
+| Check out | Check-out button on a not-checked-out package row |
+| Pull latest | Pull button (shown when the repo is behind the remote) |
+| Commit & Push | Push button, or right-click a changed file → **Commit and push…** |
+| Build / Upload / Promote | Per-row **Build**, **Upload**, and **Promote** buttons (Promote appears only when staging is ahead of production) |
+| Rename | ⋮ menu → **Rename Package** |
+| Disconnect | ⋮ menu → **Disconnect** (removes the folder from sparse-checkout and deletes the local files) |
+| Delete from repository | ⋮ menu → **Delete from repository** |
 
-`+ New Folder` creates a new package folder, commits a `.gitkeep`, and pushes.  
-`Refresh` re-reads remote and local state. `Pull All` pulls every checked-out folder.
+The `+` row creates a new package **folder locally** and adds it to the sparse-checkout. Git can't
+track an empty folder, so the package is pushed to the remote when you first **commit content** in it
+(or when the first **Build** commits its `_groups/<name>.asset` group file).
 
-Live status badges update every 5 seconds:
+`Refresh` re-reads remote and local state. `Pull all` pulls every checked-out folder. Package status
+is polled about once a minute.
+
+Status badges per row:
 
 | Badge | Meaning |
 |---|---|
-| `clean` (green) | No local changes |
-| `↑N ~M ?K` (yellow) | Staged / modified / untracked counts |
-| `stg: <id>` | Build ID currently live on staging |
-| `prod: <id>` | Build ID currently live on production |
-| `→ prod ready` | Staging is ahead of production |
+| `not checked out` | Folder exists on the remote but isn't checked out locally |
+| `clean` | No local changes |
+| `+K` | K untracked files |
+| `M` | M modified/staged files |
+| `-D` | D deleted files |
+| `staging: <id>` | Build ID currently live on staging (first 8 chars) |
+| `production: <id>` | Build ID currently live on production (first 8 chars) |
 
-### Deploy tab
+When staging is ahead of production, the per-row **Promote** button (and the toolbar **Promote all**)
+becomes visible.
 
 See **[Documentation/Pipeline-Usage.md](Documentation/Pipeline-Usage.md)** for the full build, upload,
 promote, and local-dev-override workflow.
+
+---
+
+## Generations
+
+A *generation* is a string (default `gen/1`) that namespaces every CDN path
+(`<generation>/<env>/manifest.json`, `<generation>/builds/…`) and is stamped into each build's
+metadata. Bump it when a Unity upgrade changes the Addressables bundle format so that new and old
+players never load incompatible bundles. Manage it in **Project Settings > Content Repo > Build**
+(the **Bump generation** button) — the Content Browser also shows a banner when your Unity version
+no longer matches the version the current generation was built with.
+
+The **runtime** must be initialized with the same generation string it was published under (see below).
 
 ---
 
@@ -77,14 +109,17 @@ using UnityEngine.AddressableAssets;
 // At app startup — fetches the CDN manifest and registers all remote catalogs.
 var result = await ContentRepoRuntime.InitializeAsync(
     baseUrl: "https://xxxx.cloudfront.net",
-    environment: "production");
+    environment: "production",
+    generation: "gen/1");
 
 // Assets across all content packages are now available via Addressables.
 var prefab = await Addressables.LoadAssetAsync<GameObject>("Episode01/Hero").Task;
 ```
 
 `InitializeAsync` falls back to the last cached manifest when the CDN is unreachable, so the app
-can boot offline. See [Pipeline-Usage.md §Loading content at runtime](Documentation/Pipeline-Usage.md#loading-content-at-runtime)
+can boot offline. It also gates on the manifest's `minAppVersion` / `recommendedAppVersion` and fires
+`ContentRepoRuntime.OnUpdateRequired` when the running build is too old. See
+[Pipeline-Usage.md §Loading content at runtime](Documentation/Pipeline-Usage.md#loading-content-at-runtime)
 for the config-driven bootstrap option.
 
 ---
