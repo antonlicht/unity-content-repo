@@ -347,19 +347,23 @@ namespace ContentRepo.Editor
             ValidateFolderName(folder);
 
             await EnsureSparseCheckoutAsync();
-            await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
-            await TryRemoteAsync("pull", () => RunGitCommandAsync(
-                $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath));
+            
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+                await TryRemoteAsync("pull", () => RunGitCommandAsync(
+                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
+                    ContentAbsolutePath));
 
-            // Restore the Addressables group asset for this package from the committed state
-            // in _groups/. When the package is not checked out, Unity removes entries whose
-            // asset GUIDs are missing from disk. Re-checking out the group file recovers the
-            // original entries — including any custom addresses set by content authors.
-            await TryRemoteAsync("group restore", () => RestoreGroupAssetAsync(folder));
-
-            NotifyChange();
-            AssetDatabase.Refresh();
+                await TryRemoteAsync("group restore", () => RestoreGroupAssetAsync(folder));
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
         }
 
         private static async Task RestoreGroupAssetAsync(string folder)
