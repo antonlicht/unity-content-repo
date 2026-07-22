@@ -308,17 +308,38 @@ namespace ContentRepo.Editor
                 folderStatuses[f] = s;
             }
 
+            var repairedAny = false;
             foreach (var f in diskFolders)
             {
                 if (!remoteFolders.Any(r => r.Equals(f, StringComparison.OrdinalIgnoreCase)))
-                {
                     remoteFolders.Add(f);
-                    try { await ContentGitApi.EnsureFolderInSparseCheckoutAsync(f); } catch { /* best-effort */ }
-                }
+
+                // A folder present on disk but missing from the sparse cone (content moved into the
+                // repo, or checked out by an older tool version) keeps its files skip-worktree'd, so
+                // git hides every edit — the badge shows clean and commits drop changes. Bring it
+                // into the cone and clear that bit so changes are tracked and committable. This runs
+                // for on-disk packages regardless of whether they're on the remote.
                 if (!checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase)))
+                {
+                    try { await ContentGitApi.EnsureFolderInSparseCheckoutAsync(f); repairedAny = true; }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not repair sparse-checkout for '{f}': {ex.Message}"); }
                     checkedOutFolders.Add(f);
+                }
                 allStatuses.TryGetValue(f, out var s);
                 folderStatuses[f] = s;
+            }
+
+            // Clearing skip-worktree above exposes changes git was previously ignoring. Re-read the
+            // statuses so the badges reflect them now rather than on the next poll.
+            if (repairedAny)
+            {
+                allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
+                MergeGroupsStatusInto(checkedOutFolders, allStatuses);
+                foreach (var f in checkedOutFolders)
+                {
+                    allStatuses.TryGetValue(f, out var s);
+                    folderStatuses[f] = s;
+                }
             }
             remoteFolders.Sort(StringComparer.OrdinalIgnoreCase);
 

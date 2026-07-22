@@ -356,6 +356,13 @@ namespace ContentRepo.Editor
                     $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
                     ContentAbsolutePath));
 
+                // Adding a folder to the cone does not reliably clear git's skip-worktree bit on
+                // files that were already materialised on disk (e.g. content moved into the repo, or
+                // checked out by an older tool version). While that bit is set, `git status` hides all
+                // edits and `git add` refuses to stage them — so the Content Browser shows the package
+                // clean and commits silently drop changes. Clear it so the files are tracked normally.
+                await ClearSkipWorktreeAsync(folder);
+
                 await TryRemoteAsync("group restore", () => RestoreGroupAssetAsync(folder));
             }
             finally
@@ -519,17 +526,26 @@ namespace ContentRepo.Editor
         }
 
         /// <summary>
-        /// Adds <paramref name="folder"/> to the sparse-checkout list if it is not already present.
-        /// Safe to call for folders that are already checked out — it is a no-op in that case.
+        /// Adds <paramref name="folder"/> to the sparse-checkout list if it is not already present,
+        /// and clears git's skip-worktree bit on its files so edits are tracked. Safe and idempotent
+        /// to call repeatedly.
         /// </summary>
         public static async Task EnsureFolderInSparseCheckoutAsync(string folder)
         {
             var current = await GetCheckedOutFoldersAsync();
-            if (current.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase)))
-                return; // already in sparse-checkout
+            var alreadyInCone = current.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
+            if (!alreadyInCone)
+            {
+                await EnsureSparseCheckoutAsync();
+                await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+            }
 
-            await EnsureSparseCheckoutAsync();
-            await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
+            // A folder present on disk but outside the cone (content moved into the repo, or checked
+            // out by an older tool version) keeps git's skip-worktree bit on its files, which makes
+            // git ignore every edit — the Content Browser then shows it clean and commits drop
+            // changes. Always clear the bit so the folder's files are tracked normally. This is the
+            // repair path invoked when the window discovers an on-disk-but-not-in-cone package.
+            await ClearSkipWorktreeAsync(folder);
         }
 
         /// <summary>
@@ -573,6 +589,11 @@ namespace ContentRepo.Editor
             ValidateFolderName(folder);
             if (string.IsNullOrWhiteSpace(commitMessage))
                 throw new ArgumentException("Commit message cannot be empty.", nameof(commitMessage));
+
+            // Defensive: if any of the folder's files still carry the skip-worktree bit, `git add`
+            // silently skips them and the commit would omit real changes (e.g. edited voice maps,
+            // scripts, or art). Clear it first so the whole working state of the folder is staged.
+            await ClearSkipWorktreeAsync(folder);
 
             // Stage package content normally.
             await RunGitCommandAsync($"add -- {Quote(folder)}", ContentAbsolutePath);
@@ -877,8 +898,9 @@ namespace ContentRepo.Editor
             }
         }
 
-        // Clears the sparse-checkout skip-worktree bit on all indexed files under `folderOrPath`
-        // so that subsequent git rm / git rm --cached commands can process them.
+        // Clears git's skip-worktree bit on all indexed files under `folderOrPath`. Used both to let
+        // `git rm` process sparse-excluded files and, on checkout, to make a folder's files trackable
+        // so `git status` / `git add` see edits (see CheckOutFolderAsync / EnsureFolderInSparseCheckoutAsync).
         private static async Task ClearSkipWorktreeAsync(string folderOrPath)
         {
             try
@@ -891,12 +913,19 @@ namespace ContentRepo.Editor
                     .Select(f => f.Trim())
                     .Where(f => !string.IsNullOrEmpty(f))
                     .ToList();
-                if (files.Count > 0)
+
+                // Batch the paths so a large folder (e.g. thousands of voiceover clips) never blows
+                // past the OS command-line length limit in a single update-index invocation.
+                const int batchSize = 100;
+                for (var i = 0; i < files.Count; i += batchSize)
+                {
+                    var batch = files.Skip(i).Take(batchSize);
                     await RunGitCommandAsync(
-                        $"update-index --no-skip-worktree -- {string.Join(" ", files.Select(Quote))}",
+                        $"update-index --no-skip-worktree -- {string.Join(" ", batch.Select(Quote))}",
                         ContentAbsolutePath);
+                }
             }
-            catch { /* best-effort — if this fails, the rm may still succeed */ }
+            catch { /* best-effort — if this fails, the caller's operation may still succeed */ }
         }
 
         // Returns repo-relative paths for all group + schema files that belong to `folder` and exist on disk.
