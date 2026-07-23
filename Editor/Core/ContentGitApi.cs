@@ -669,12 +669,22 @@ namespace ContentRepo.Editor
         public static async Task PullFolderAsync(string folder)
         {
             ValidateFolderName(folder);
-            await RunGitCommandAsync(
-                $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath);
-
-            NotifyChange();
-            AssetDatabase.Refresh();
+            // Suspend Unity's importer while git rewrites the working tree: a pull can transiently
+            // materialise an asset before its .meta, and an import in that window regenerates the GUID
+            // (breaking every reference to it). Same guard as CheckOutFolderAsync.
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                await RunGitCommandAsync(
+                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
+                    ContentAbsolutePath);
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
         }
 
         public static async Task CommitAndPushFolderAsync(string folder, string commitMessage)
@@ -887,12 +897,21 @@ namespace ContentRepo.Editor
 
         public static async Task PullAllAsync()
         {
-            await RunGitCommandAsync(
-                $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath);
-
-            NotifyChange();
-            AssetDatabase.Refresh();
+            // Suspend Unity's importer while git rewrites the working tree (see PullFolderAsync) so a
+            // pull that touches assets can't regenerate their GUIDs mid-import.
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                await RunGitCommandAsync(
+                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
+                    ContentAbsolutePath);
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
         }
 
         public static async Task<string> GetStatusAsync(string folder)
