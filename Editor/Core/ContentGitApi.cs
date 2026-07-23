@@ -383,21 +383,25 @@ namespace ContentRepo.Editor
             var groupMetaRelPath = $"{GroupsFolderName}/{folder}.asset.meta";
             var schemaGlob       = $"{GroupsFolderName}/{folder}_*"; // schema assets that travel with the group
 
-            // git checkout HEAD -- <path> restores the file to the last committed state.
-            // Silently ignore paths that don't exist in HEAD yet (e.g. first-ever checkout
-            // before any build has committed the group/schema files).
-            foreach (var relPath in new[] { groupRelPath, groupMetaRelPath, schemaGlob })
+            // git checkout HEAD -- <path> restores the file to the last committed state. The group
+            // asset warns if genuinely absent; the meta and schema files may legitimately not be
+            // committed yet (schemas move into _groups/ only on the first build/play), so ignore those.
+            try
             {
-                try
-                {
-                    await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath);
-                }
+                await RunGitCommandAsync($"checkout HEAD -- {Quote(groupRelPath)}", ContentAbsolutePath);
+            }
+            catch (InvalidOperationException ex)
+                when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
+            {
+                Debug.LogWarning($"[ContentRepo] No committed group asset found for '{folder}' in {GroupsFolderName}/; skipping group restore.");
+                return;
+            }
+
+            foreach (var relPath in new[] { groupMetaRelPath, schemaGlob })
+            {
+                try { await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath); }
                 catch (InvalidOperationException ex)
-                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
-                {
-                    // File not yet committed — no group to restore; that's fine.
-                    Debug.LogWarning($"[ContentRepo] No committed group asset found for '{folder}' in {GroupsFolderName}/; skipping group restore.");
-                }
+                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec")) { /* not committed yet — fine */ }
             }
         }
 
