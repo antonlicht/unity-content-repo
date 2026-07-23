@@ -258,7 +258,7 @@ namespace ContentRepo.Editor
                     throw new InvalidOperationException(
                         $"No .bundle files found in '{buildOutputPath}'. Check the Addressables build output path.");
 
-                var buildId = ComputeBuildId(bundleFiles);
+                var buildId = ComputeBuildId(bundleFiles, buildOutputPath);
                 var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
                 var gitSha = await TryGetGitShaAsync();
 
@@ -629,14 +629,33 @@ namespace ContentRepo.Editor
             }
         }
 
-        internal static string ComputeBuildId(string[] bundleFiles)
+        internal static string ComputeBuildId(string[] bundleFiles, string buildOutputPath = null)
         {
-            var names = bundleFiles
+            var parts = bundleFiles
                 .Select(Path.GetFileName)
-                .OrderBy(n => n, StringComparer.Ordinal);
-            var combined = string.Join("|", names);
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToList();
+
+            // The buildId is the cache-bust key — it forms the S3 path and the catalog URL the client fetches —
+            // so it must also change when the CATALOG changes even if the bundle set is byte-identical. Re-mapping
+            // which clip voices a line (or any address→asset edit) rewrites the catalog but touches no bundle, so
+            // hashing bundle names alone reuses the same buildId and clients keep the stale catalog. Fold in the
+            // Addressables catalog fingerprint: the catalog_*.hash file (its own content hash, deterministic for
+            // identical content, so identical builds still yield identical buildIds), falling back to the catalog
+            // JSON if no .hash is present.
+            if (!string.IsNullOrEmpty(buildOutputPath) && Directory.Exists(buildOutputPath))
+            {
+                var hashes = Directory.GetFiles(buildOutputPath, "catalog_*.hash", SearchOption.AllDirectories);
+                var catalogFiles = hashes.Length > 0
+                    ? hashes
+                    : Directory.GetFiles(buildOutputPath, "catalog_*.json", SearchOption.AllDirectories);
+                parts.AddRange(catalogFiles
+                    .OrderBy(p => Path.GetFileName(p), StringComparer.Ordinal)
+                    .Select(File.ReadAllText));
+            }
+
             using var sha = SHA256.Create();
-            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(combined));
+            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(string.Join("|", parts)));
             return BitConverter.ToString(hash).Replace("-", "").Substring(0, 16).ToLowerInvariant();
         }
 
