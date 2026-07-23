@@ -7,6 +7,8 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Settings;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
@@ -370,6 +372,8 @@ namespace ContentRepo.Editor
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
+                // The group asset is now imported; re-register it if a prior disconnect removed it.
+                ReAddContentGroupToSettings(folder);
             }
         }
 
@@ -421,8 +425,50 @@ namespace ContentRepo.Editor
                 catch (Exception ex) { UnityEngine.Debug.LogWarning($"Failed to delete meta '{meta}': {ex.Message}"); }
             }
 
+            // Drop the package's Addressables group from the project so it doesn't orphan (its assets
+            // are gone). The committed _groups/<folder>.asset stays on disk and is re-registered on
+            // the next checkout, so this is reversible.
+            RemoveContentGroupFromSettings(folder);
+
             NotifyChange();
             AssetDatabase.Refresh();
+        }
+
+        /// <summary>Removes the package's Addressables group from the active settings without deleting
+        /// its committed group asset (kept in <c>_groups/</c> for re-checkout).</summary>
+        private static void RemoveContentGroupFromSettings(string folder)
+        {
+            try
+            {
+                var settings = AddressableAssetSettingsDefaultObject.Settings;
+                var group = settings != null ? settings.FindGroup(folder) : null;
+                if (group == null) return;
+                settings.groups.Remove(group);
+                EditorUtility.SetDirty(settings);
+                AssetDatabase.SaveAssetIfDirty(settings);
+                Debug.Log($"[ContentRepo] Removed Addressables group '{folder}' from the project (disconnected).");
+            }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not remove Addressables group '{folder}': {ex.Message}"); }
+        }
+
+        /// <summary>Re-registers a package's committed group asset into the Addressables settings after
+        /// checkout, in case a prior disconnect removed it. No-op when already present or absent.</summary>
+        private static void ReAddContentGroupToSettings(string folder)
+        {
+            try
+            {
+                var settings = AddressableAssetSettingsDefaultObject.Settings;
+                if (settings == null || settings.FindGroup(folder) != null) return;
+                var localPath = ContentRepoSettings.instance.LocalPath?.Replace('\\', '/').TrimEnd('/');
+                if (string.IsNullOrEmpty(localPath)) return;
+                var group = AssetDatabase.LoadAssetAtPath<AddressableAssetGroup>($"{localPath}/{GroupsFolderName}/{folder}.asset");
+                if (group == null) return;
+                settings.groups.Add(group);
+                EditorUtility.SetDirty(settings);
+                AssetDatabase.SaveAssetIfDirty(settings);
+                Debug.Log($"[ContentRepo] Re-registered Addressables group '{folder}' after checkout.");
+            }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not re-register Addressables group '{folder}': {ex.Message}"); }
         }
 
         public static async Task CreateFolderAsync(string folder)

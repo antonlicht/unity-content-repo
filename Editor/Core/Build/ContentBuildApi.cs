@@ -457,13 +457,19 @@ namespace ContentRepo.Editor
             // expected build output path, causing the "No .bundle files found" error.
             EnsureProfileVariable(settings, buildSettings.RemoteBuildPathVariableName, "ServerData/[BuildTarget]", log);
             EnsureProfileVariable(settings, buildSettings.RemoteLoadPathVariableName, LoadPathPlaceholder, log);
+            // A group's BundledAssetGroupSchema is a *separate* asset (in AddressableAssetsData/…/Schemas)
+            // referenced by GUID — it does NOT travel inside the content repo's group file. After a fresh
+            // checkout (or if Addressables regenerated it) that reference dangles and GetSchema returns
+            // null. Recreate it so the build proceeds instead of throwing a NullReferenceException below.
             var schemaCfg = group.GetSchema<BundledAssetGroupSchema>();
-            if (schemaCfg != null)
+            if (schemaCfg == null)
             {
-                schemaCfg.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
-                schemaCfg.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
-                schemaCfg.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
+                schemaCfg = group.AddSchema<BundledAssetGroupSchema>();
+                log?.Invoke($"[Build] Group '{contentPackageName}' had no BundledAssetGroupSchema (its schema asset was missing) — recreated it.");
             }
+            schemaCfg.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
+            schemaCfg.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
+            schemaCfg.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
 
             // Ensure the group file lives in _groups/ in the content repo so it can be
             // committed and sparse-checked-out independently of the package content.
