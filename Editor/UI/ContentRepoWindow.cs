@@ -576,9 +576,15 @@ namespace ContentRepo.Editor
                             deployLog));
                 if (stgId != null)
                     menu.AddItem(new GUIContent("Remove from staging"), false, () =>
-                        _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
-                            async () => { await ContentUploadApi.RemoveFromManifestAsync(pkg, staging, AppendDeployLog); await RefreshManifestsAsync(); },
-                            deployLog));
+                    {
+                        var msg = stgId == prdId
+                            ? $"Remove '{pkg}' from the staging manifest?\nProduction shares this build, so its bundles are kept."
+                            : $"Remove '{pkg}' from staging and delete its bundles from S3?\nThis cannot be undone.";
+                        if (EditorUtility.DisplayDialog("Remove from staging", msg, "Remove", "Cancel"))
+                            _ = RunPipelineAsync($"Removing '{pkg}' from staging…",
+                                async () => { await ContentUploadApi.RemoveFromStagingAsync(pkg, platform, AppendDeployLog); await RefreshManifestsAsync(); },
+                                deployLog);
+                    });
                 if (prdId != null)
                     menu.AddItem(new GUIContent("Remove from production"), false, () =>
                     {
@@ -866,6 +872,20 @@ namespace ContentRepo.Editor
                             catch { SetPipelineStatus(statusLbl, "err"); throw; }
                             finally { await RefreshManifestsAsync(); }
                         }, deployLog));
+                if (stgId != null)
+                {
+                    menu.AddSeparator("");
+                    menu.AddItem(new GUIContent("Remove from staging"), false, () =>
+                    {
+                        var msg = stgId == prdId
+                            ? $"Remove '{folder}' from the staging manifest?\nProduction shares this build, so its bundles are kept."
+                            : $"Remove '{folder}' from staging and delete its bundles from S3?\nThis cannot be undone.";
+                        if (EditorUtility.DisplayDialog("Remove from staging", msg, "Remove", "Cancel"))
+                            _ = RunPipelineAsync($"Removing '{folder}' from staging…",
+                                async () => { await ContentUploadApi.RemoveFromStagingAsync(folder, platform, AppendDeployLog); await RefreshManifestsAsync(); },
+                                deployLog);
+                    });
+                }
                 var production3 = ContentUploadSettings.instance.ProductionPrefix;
                 if (prdId != null)
                 {
