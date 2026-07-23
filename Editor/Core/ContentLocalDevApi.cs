@@ -262,6 +262,9 @@ namespace ContentRepo.Editor
                     log?.Invoke($"[LocalDev] Group file is at '{targetGroupPath}'.");
             }
 
+            // Relocate the group's schema assets into _groups/ too so they travel with the content repo.
+            ContentBuildApi.MoveGroupSchemasIntoContentRepo(group, groupsFolder, log);
+
             // Sync entries: add new assets, remove stale ones, leave existing ones untouched
             // (preserves any custom addresses set by content authors).
             var guidSet       = new HashSet<string>(guids,                              StringComparer.OrdinalIgnoreCase);
