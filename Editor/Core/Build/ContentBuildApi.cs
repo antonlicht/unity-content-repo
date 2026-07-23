@@ -56,6 +56,15 @@ namespace ContentRepo.Editor
 
         public static event Action<ContentBuildResult> OnBuildComplete;
 
+        /// <summary>
+        /// Raised at the very start of <see cref="BuildContentPackageAsync"/>, before the package's
+        /// Addressables group is assembled. Runs synchronously so subscribers can make the group
+        /// deterministically complete before it is built — e.g. the game's Naninovel voice-map
+        /// relocation, which must not depend on the editor's periodic sync tick having fired.
+        /// The argument is the content package name being built.
+        /// </summary>
+        public static event Action<string> BeforePackageBuild;
+
         // In-memory cache of most recent build per package (keyed by contentPackageName).
         private static readonly Dictionary<string, ContentBuildResult> LastResults = new(StringComparer.Ordinal);
 
@@ -66,6 +75,11 @@ namespace ContentRepo.Editor
             string contentPackageName, BuildLogHandler log = null)
         {
             ValidatePackageName(contentPackageName);
+
+            // Let subscribers finalize the package's group first (e.g. relocate Naninovel voice-map
+            // entries into it) so the build is deterministic rather than reliant on an editor tick.
+            try { BeforePackageBuild?.Invoke(contentPackageName); }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] BeforePackageBuild hook failed for '{contentPackageName}': {ex.Message}"); }
 
             var genSettings = ContentRepoGenerationSettings.instance;
             var buildSettings = ContentBuildSettings.instance;
