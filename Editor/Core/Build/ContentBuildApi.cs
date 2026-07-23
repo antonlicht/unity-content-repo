@@ -511,6 +511,13 @@ namespace ContentRepo.Editor
                 added++;
             }
 
+            // Label every entry with the package name so the runtime can query/download the package as
+            // a unit (ContentRepoRuntime.PreloadPackageAsync). Must happen at build time so the label
+            // lands in the shipped catalog — the editor play-mode auto-setup labels only affect Fast Mode.
+            settings.AddLabel(contentPackageName, postEvent: false);
+            foreach (var entry in group.entries)
+                entry.SetLabel(contentPackageName, enable: true, force: false, postEvent: false);
+
             AssetDatabase.SaveAssets();
             log?.Invoke($"[Build] Group '{contentPackageName}': {group.entries.Count} asset(s) ({added} added, {existingGuids.Count - (guidSet.Count - added)} removed) from {contentAssetPath}");
             return group;

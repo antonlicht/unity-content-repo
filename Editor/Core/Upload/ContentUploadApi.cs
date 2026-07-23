@@ -75,10 +75,19 @@ namespace ContentRepo.Editor
                         }
                     }
                 };
+                // Capture the build this environment currently points at (before we overwrite it), so a
+                // staging upload can prune the now-superseded bundles below.
+                string previousBuildId = null;
+                try { previousBuildId = (await GetManifestAsync(environment))?.Find(contentPackageName)?.FindPlatform(platform)?.buildId; }
+                catch { /* no current manifest — nothing to supersede */ }
+
                 await ContentManifestApi.UpsertEntryAsync(environment, generation, manifestEntry, provider, log);
 
                 RecordUploadTimestamp(contentPackageName, platform, environment);
                 log?.Invoke($"[Upload] Done. Remote prefix: {remotePrefix}");
+
+                await PruneSupersededStagingBuildAsync(
+                    contentPackageName, environment, previousBuildId, buildId, platform, generation, provider, log);
 
                 result = new ContentUploadResult
                 {
@@ -110,6 +119,52 @@ namespace ContentRepo.Editor
             {
                 try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { /* best-effort */ }
                 try { OnUploadComplete?.Invoke(result); } catch (Exception ex) { Debug.LogException(ex); }
+            }
+        }
+
+        /// <summary>
+        /// After a STAGING upload replaces a package's build, deletes the previous build's S3 bundles so
+        /// staging holds only the actively-staged content. Guarded so it can never break production:
+        /// skips a build still referenced by the production manifest (a promoted build shares the same
+        /// S3 path) and one recorded in the delete-schedule (production retention/rollback window).
+        /// No-op for non-staging environments or when the setting is off.
+        /// </summary>
+        private static async Task PruneSupersededStagingBuildAsync(
+            string package, string environment, string previousBuildId, string newBuildId,
+            string platform, string generation, IContentUploadProvider provider, UploadLogHandler log)
+        {
+            var settings = ContentUploadSettings.instance;
+            if (!settings.AutoPruneSupersededStagingBuilds) return;
+            if (!string.Equals(environment, settings.StagingPrefix, StringComparison.Ordinal)) return; // staging only
+            if (string.IsNullOrEmpty(previousBuildId) || previousBuildId == newBuildId) return;
+
+            // Never delete a build production points at — promotion copies the entry, so prod shares the
+            // same buildId + S3 path; deleting it would pull the bundles out from under production.
+            var prodJson = await provider.DownloadTextAsync($"{generation}/{settings.ProductionPrefix}/manifest.json") ?? "";
+            if (prodJson.Contains(previousBuildId))
+            {
+                log?.Invoke($"[Upload] Kept superseded build {previousBuildId} — still referenced by production.");
+                return;
+            }
+
+            // Never delete a build being retained for rollback (once production retention is wired up it
+            // records builds here); the daily cleanup Lambda handles those on their own schedule.
+            var scheduleJson = await provider.DownloadTextAsync($"{generation}/delete-schedule.json") ?? "";
+            if (scheduleJson.Contains(previousBuildId))
+            {
+                log?.Invoke($"[Upload] Kept superseded build {previousBuildId} — retained by the delete-schedule.");
+                return;
+            }
+
+            try
+            {
+                var prefix = BuildRemotePrefix(generation, previousBuildId, platform, package);
+                await DeleteS3PrefixAsync(prefix, provider, log);
+                log?.Invoke($"[Upload] Pruned superseded staging build {previousBuildId} ({prefix}).");
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"[Upload] WARNING: could not prune superseded staging build {previousBuildId}: {ex.Message}");
             }
         }
 

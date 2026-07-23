@@ -22,6 +22,7 @@ namespace ContentRepo.Editor
         [SerializeField] private string cloudFrontDomain = "";
         [SerializeField] private string stagingPrefix = "staging";
         [SerializeField] private string productionPrefix = "production";
+        [SerializeField] private bool autoPruneSupersededStagingBuilds = true;
 
         public UploadProviderType ProviderType => providerType;
         public string S3BucketName => s3BucketName;
@@ -30,6 +31,9 @@ namespace ContentRepo.Editor
         public string CloudFrontDomain => cloudFrontDomain;
         public string StagingPrefix => stagingPrefix;
         public string ProductionPrefix => productionPrefix;
+        /// <summary>When true, a staging upload deletes the previous staging build's bundles (unless
+        /// production references them or they're in the delete-schedule). Keeps staging lean.</summary>
+        public bool AutoPruneSupersededStagingBuilds => autoPruneSupersededStagingBuilds;
 
         public string GetEnvironmentPrefix(BuildEnvironment env) => env switch
         {
@@ -77,6 +81,7 @@ namespace ContentRepo.Editor
                     container.Add(new PropertyField(so.FindProperty("cloudFrontDomain"), "CloudFront domain"));
                     container.Add(new PropertyField(so.FindProperty("stagingPrefix"), "Staging environment prefix"));
                     container.Add(new PropertyField(so.FindProperty("productionPrefix"), "Production environment prefix"));
+                    container.Add(new PropertyField(so.FindProperty("autoPruneSupersededStagingBuilds"), "Auto-prune superseded staging builds"));
 
                     var loginBtn = new Button(AwsLoginWindow.Open)
                     {
