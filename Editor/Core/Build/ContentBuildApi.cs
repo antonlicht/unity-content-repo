@@ -202,32 +202,29 @@ namespace ContentRepo.Editor
                                 "built-in/MonoScript bundles may fall back to the Default group's local paths and fail to load at runtime.");
                 }
 
-                // Suppress the per-package MonoScript bundle. Content packages are DLC that always run inside
-                // the full client, which already ships (and loads) an identical monoscripts bundle. Building
-                // our own copy makes Unity refuse it at runtime — "another AssetBundle with the same files is
-                // already loaded" — because it holds the same MonoScript objects. The client's copy provides
-                // those types (same GUIDs, same assemblies), so the package doesn't need its own. Custom naming
-                // with an empty prefix makes GetMonoScriptBundleNamePrefix return "" → no monoscripts bundle is
-                // created (BuildScriptPackedMode only builds it when the prefix is non-empty). The built-in
-                // shaders (unitybuiltinassets) bundle is handled separately.
+                // Give the shared MonoScript and built-in-shaders bundles a UNIQUE internal name per package so
+                // they don't collide with the client's copies across catalogs. Content packages are DLC loaded
+                // on top of the full client. Both the client and every content build name these two bundles via
+                // MonoScriptBundleNaming / BuiltInBundleNaming = ProjectName = Hash128(projectName) — an IDENTICAL
+                // internal bundle name (CAB). At runtime Unity refuses to load a second bundle whose internal
+                // identity matches an already-loaded one ("another AssetBundle with the same files is already
+                // loaded"). Renaming — not suppressing — is the fix: the "same files" check keys on the bundle's
+                // internal identity, not the objects it holds, so a unique name lets both load (the package's
+                // ~few-KB copies are duplicated in memory, which is negligible and the community-standard fix for
+                // multi-catalog shared-bundle conflicts). DefaultGroupGuid wouldn't help (same default group as
+                // the client), so use a Custom prefix keyed to the package: unique vs the client AND other packages.
+                //
+                // IMPORTANT: do NOT suppress the MonoScript bundle (empty prefix). Content scripts such as
+                // Naninovel's Script are ScriptableObjects; without a MonoScript bundle their script-type
+                // reference can't resolve and they load as null ("Failed to load '<script>' resource of type
+                // 'Naninovel.Script'"). Cross-catalog resolution against the client's monoscripts bundle does not
+                // happen — the package must ship its own (uniquely named) copy.
+                var uniqueSharedPrefix = $"contentrepo_{contentPackageName}";
                 settings.MonoScriptBundleNaming = MonoScriptBundleNaming.Custom;
-                settings.MonoScriptBundleCustomNaming = string.Empty;
-                log?.Invoke("[Build] MonoScript bundle suppressed (provided by the client; avoids duplicate-bundle conflict).");
-
-                // Give the built-in-shaders bundle (Resources/unity_builtin_extra: default sprite shader, etc.)
-                // a UNIQUE internal name per package. Unlike MonoScripts it can't be suppressed — but it can be
-                // uniquely named. The conflict is NOT the external filename (already differs) but the bundle's
-                // *internal* identity: GetBuiltInBundleNamePrefix uses settings.BuiltInBundleNaming, whose
-                // default (ProjectName) is Hash128(projectName) — identical for the client build and every
-                // content build. Two bundles sharing that internal name but holding the same unity_builtin_extra
-                // objects make Unity refuse the second at runtime ("another AssetBundle with the same files is
-                // already loaded"). DefaultGroupGuid wouldn't help (same default group as the client), so use a
-                // Custom prefix keyed to the package: unique vs the client AND vs other packages. The 19 KB
-                // bundle is duplicated in memory, which is negligible and the community-standard fix for
-                // multi-catalog built-in-shader conflicts.
+                settings.MonoScriptBundleCustomNaming = uniqueSharedPrefix;
                 settings.BuiltInBundleNaming = BuiltInBundleNaming.Custom;
-                settings.BuiltInBundleCustomNaming = $"contentrepo_{contentPackageName}";
-                log?.Invoke($"[Build] Built-in-shaders bundle named uniquely for '{contentPackageName}' (avoids cross-catalog duplicate-bundle conflict).");
+                settings.BuiltInBundleCustomNaming = uniqueSharedPrefix;
+                log?.Invoke($"[Build] MonoScript + built-in-shaders bundles named uniquely for '{contentPackageName}' (present so content resolves, unique so they don't collide with the client).");
 
                 // Wipe the Addressables build output so stale bundles from previous runs
                 // don't mix in, keeping the buildId deterministic across identical builds.
