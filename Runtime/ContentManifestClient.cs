@@ -30,14 +30,17 @@ namespace ContentRepo
                 if (manifest == null) throw new InvalidDataException($"Manifest at {url} could not be parsed.");
                 SaveCached(environment, generation, json);
                 ContentLocalDevOverrides.InjectIntoManifest(manifest);
+                Debug.Log($"[ContentRepo] Manifest fetched from the ONLINE SERVER ({environment}, {generation}): {url} — {manifest.contentPackages?.Count ?? 0} package(s).");
                 return manifest;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ContentRepo] Manifest fetch from {url} failed: {ex.Message}. Falling back to cache.");
+                Debug.LogWarning($"[ContentRepo] Manifest fetch from {url} failed: {ex.Message}. Falling back to CACHED manifest.");
                 var cached = LoadCached(environment, generation);
                 ContentLocalDevOverrides.InjectIntoManifest(cached);
+                if (cached != null)
+                    Debug.Log($"[ContentRepo] Manifest loaded from local CACHE ({environment}, {generation}) — content will resolve from previously downloaded data, not fresh from the server.");
                 return cached;
             }
         }
