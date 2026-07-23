@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Build;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
@@ -114,6 +115,8 @@ namespace ContentRepo.Editor
             var previousRemoteCatalogBuildId  = settings.RemoteCatalogBuildPath.Id;
             var previousRemoteCatalogLoadId   = settings.RemoteCatalogLoadPath.Id;
             var previousBuilderIndex          = settings.ActivePlayerDataBuilderIndex;
+            var previousSharedBundleSettings  = settings.SharedBundleSettings;
+            var previousSharedBundleGroupIndex = settings.SharedBundleSettingsCustomGroupIndex;
 
             // BuildPlayerContent requires the packed-mode builder (Default Build Script).
             // Play Mode Scripts (Use Asset Database / Use Existing Build) cannot produce bundles.
@@ -171,6 +174,29 @@ namespace ContentRepo.Editor
                 }
 
                 tempGroup = CreateTemporaryGroup(settings, contentPackageName, profileId, buildSettings, log);
+
+                // Route the shared "built-in shaders" (unitybuiltinassets) and "MonoScript" (monoscripts)
+                // bundles into this package's own group. Addressables derives those two shared bundles'
+                // build/load paths from GetSharedBundleGroup() — which is the DefaultGroup unless overridden.
+                // With the default (local) group, they build to Library/com.unity.addressables/aa (never
+                // uploaded to the CDN) and get a LOCAL load path baked into the catalog. At runtime the
+                // consumer then can't find them, and every content asset that depends on them — i.e. every
+                // ScriptableObject/prefab/shader user, which includes all Naninovel scripts and actors —
+                // fails to load. Pointing SharedBundleSettings at the temp group makes them build to
+                // ServerData, upload with the package, and load from the remote placeholder → CDN. Each
+                // package carries its own copy (self-contained), which is what OTA delivery needs.
+                var sharedGroupIndex = settings.groups.IndexOf(tempGroup);
+                if (sharedGroupIndex >= 0)
+                {
+                    settings.SharedBundleSettings = SharedBundleSettings.CustomGroup;
+                    settings.SharedBundleSettingsCustomGroupIndex = sharedGroupIndex;
+                    log?.Invoke($"[Build] Shared built-in/MonoScript bundles routed into '{contentPackageName}' (self-contained, CDN-delivered).");
+                }
+                else
+                {
+                    log?.Invoke($"[Build] WARNING: could not locate group '{contentPackageName}' in settings.groups to host shared bundles; " +
+                                "built-in/MonoScript bundles may fall back to the Default group's local paths and fail to load at runtime.");
+                }
 
                 // Wipe the Addressables build output so stale bundles from previous runs
                 // don't mix in, keeping the buildId deterministic across identical builds.
@@ -262,6 +288,8 @@ namespace ContentRepo.Editor
                 settings.OverridePlayerVersion = previousPlayerVersion;
                 settings.BuildRemoteCatalog = previousBuildRemoteCatalog;
                 settings.ActivePlayerDataBuilderIndex = previousBuilderIndex;
+                settings.SharedBundleSettings = previousSharedBundleSettings;
+                settings.SharedBundleSettingsCustomGroupIndex = previousSharedBundleGroupIndex;
                 if (previousRemoteCatalogBuildId != null)
                     settings.RemoteCatalogBuildPath.SetVariableById(settings, previousRemoteCatalogBuildId);
                 if (previousRemoteCatalogLoadId != null)
