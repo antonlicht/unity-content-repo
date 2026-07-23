@@ -337,6 +337,51 @@ namespace ContentRepo
 
         public static void ResetLoadedVersions() => LoadedVersions.Clear();
 
+        /// <summary>
+        /// Downloads a content package's asset bundles ahead of use — they otherwise download lazily on
+        /// first access. Use this to drive a "downloading chapter…" spinner before entering it: await
+        /// with an <see cref="IProgress{T}"/>, then the subsequent Naninovel load is served from cache.
+        /// Requires the package's catalog to already be registered (via <see cref="InitializeAsync"/>).
+        /// Returns the number of bytes that had to be downloaded (0 = already cached / nothing to fetch).
+        /// Keyed on the package-name label the build stamps onto every entry.
+        /// </summary>
+        public static async Task<long> PreloadPackageAsync(
+            string packageName, IProgress<float> progress = null, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(packageName)) throw new ArgumentException("packageName required.", nameof(packageName));
+
+            long bytes;
+            var sizeHandle = Addressables.GetDownloadSizeAsync((object)packageName);
+            try { bytes = await sizeHandle.Task; }
+            finally { if (sizeHandle.IsValid()) Addressables.Release(sizeHandle); }
+
+            if (bytes <= 0)
+            {
+                Debug.Log($"[ContentRepo] '{packageName}' already cached — no download needed.");
+                progress?.Report(1f);
+                return 0;
+            }
+
+            Debug.Log($"[ContentRepo] Preloading '{packageName}' — {bytes / 1024f / 1024f:0.0} MB to download from the ONLINE server.");
+            var dl = Addressables.DownloadDependenciesAsync((object)packageName, autoReleaseHandle: false);
+            try
+            {
+                while (!dl.IsDone)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    progress?.Report(dl.PercentComplete);
+                    await Task.Yield();
+                }
+                if (dl.Status != AsyncOperationStatus.Succeeded)
+                    throw new Exception(dl.OperationException?.Message ?? "download did not succeed");
+            }
+            finally { if (dl.IsValid()) Addressables.Release(dl); }
+
+            progress?.Report(1f);
+            Debug.Log($"[ContentRepo] '{packageName}' download complete ({bytes / 1024f / 1024f:0.0} MB).");
+            return bytes;
+        }
+
         // Maps RuntimePlatform to the Unity build target string used in CDN paths.
         private static string ResolvePlatformName()
         {
