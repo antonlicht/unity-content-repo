@@ -236,7 +236,26 @@ namespace ContentRepo.Editor
                     $"'{contentPackageName}' not found in {fromEnvironment} manifest.");
 
             log?.Invoke($"[Promote] '{contentPackageName}' {fromEnvironment} → {toEnvironment}");
+
+            // When promoting TO production over an existing build, schedule the superseded production
+            // build for deletion after the retention window. The daily cleanup Lambda drains the
+            // schedule and never deletes a build a manifest still references, so this is safe.
+            var settings = ContentUploadSettings.instance;
+            ContentManifestEntry supersededProd = null;
+            if (string.Equals(toEnvironment, settings.ProductionPrefix, StringComparison.Ordinal))
+                try { supersededProd = (await GetManifestAsync(toEnvironment))?.Find(contentPackageName); } catch { /* no prod yet */ }
+
             await ContentManifestApi.UpsertEntryAsync(toEnvironment, generation, entry, provider, log);
+
+            if (supersededProd?.platforms != null)
+                foreach (var oldPlat in supersededProd.platforms)
+                {
+                    var newBuildId = entry.FindPlatform(oldPlat.platform)?.buildId;
+                    if (!string.IsNullOrEmpty(oldPlat.buildId) && oldPlat.buildId != newBuildId)
+                        await MarkForDeletionAsync(oldPlat.buildId, generation, contentPackageName,
+                            oldPlat.platform, settings.ProductionRetentionDays, log);
+                }
+
             log?.Invoke("[Promote] Done.");
         }
 
