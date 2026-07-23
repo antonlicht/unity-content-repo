@@ -92,6 +92,16 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException(
                     "Addressables is not initialized. Open Window > Asset Management > Addressables > Groups.");
 
+            // Content Repo requires JSON catalogs: the manifest references catalog_<pkg>.json and the
+            // upload's URL rewriting is JSON-text-based, so a binary catalog can't be published or read
+            // (the manifest points at a .json that was never produced → 403/404 at runtime). Addressables
+            // 2.x defaults to binary, so fail loudly instead of silently shipping an unloadable package.
+            if (!settings.EnableJsonCatalog)
+                throw new InvalidOperationException(
+                    "Content Repo requires JSON catalogs, but 'Enable Json Catalog' is disabled. The build would " +
+                    "produce a binary catalog that the manifest and runtime can't load. Enable Addressable Asset " +
+                    "Settings > Catalog > Enable Json Catalog, let the project recompile, then rebuild.");
+
             var profileId = settings.profileSettings.GetProfileId(buildSettings.AddressablesProfileName);
             if (string.IsNullOrEmpty(profileId))
                 throw new InvalidOperationException(
