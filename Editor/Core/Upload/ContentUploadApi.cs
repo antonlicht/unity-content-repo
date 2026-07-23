@@ -199,6 +199,53 @@ namespace ContentRepo.Editor
             await provider.InvalidatePathAsync($"/{generation}/{environment}/manifest.json", log);
         }
 
+        /// <summary>
+        /// Removes a package from the staging manifest and prunes its staging bundles from S3 — the manual
+        /// counterpart to <see cref="PruneSupersededStagingBuildAsync"/>. The manifest entry is always
+        /// removed; the S3 delete is guarded exactly like the auto-prune: skipped if production still
+        /// references the same build (promotion shares the buildId + S3 path, so deleting it would pull the
+        /// bundles out from under production) or if the build is retained by the delete-schedule.
+        /// </summary>
+        public static async Task RemoveFromStagingAsync(string package, string platform, UploadLogHandler log = null)
+        {
+            var settings   = ContentUploadSettings.instance;
+            var generation = ContentRepoGenerationSettings.instance.Generation;
+            var provider   = ContentUploadProviderFactory.Resolve();
+
+            // Capture the staging buildId before dropping the entry, so we know which bundles to prune.
+            var stagingManifest = await GetManifestAsync(settings.StagingPrefix);
+            var buildId = stagingManifest?.Find(package)?.FindPlatform(platform)?.buildId;
+
+            await RemoveFromManifestAsync(package, settings.StagingPrefix, log);
+
+            if (string.IsNullOrEmpty(buildId)) return;
+
+            var prodJson = await provider.DownloadTextAsync($"{generation}/{settings.ProductionPrefix}/manifest.json") ?? "";
+            if (prodJson.Contains(buildId))
+            {
+                log?.Invoke($"[Upload] Removed '{package}' from staging; kept build {buildId} bundles — still referenced by production.");
+                return;
+            }
+
+            var scheduleJson = await provider.DownloadTextAsync($"{generation}/delete-schedule.json") ?? "";
+            if (scheduleJson.Contains(buildId))
+            {
+                log?.Invoke($"[Upload] Removed '{package}' from staging; kept build {buildId} bundles — retained by the delete-schedule.");
+                return;
+            }
+
+            try
+            {
+                var prefix = BuildRemotePrefix(generation, buildId, platform, package);
+                await DeleteS3PrefixAsync(prefix, provider, log);
+                log?.Invoke($"[Upload] Removed '{package}' from staging and pruned build {buildId} ({prefix}).");
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"[Upload] WARNING: removed '{package}' from staging manifest but could not prune build {buildId}: {ex.Message}");
+            }
+        }
+
         // ── Manifest read ────────────────────────────────────────────────────────
 
         public static async Task<ContentManifest> GetManifestAsync(string environment)
