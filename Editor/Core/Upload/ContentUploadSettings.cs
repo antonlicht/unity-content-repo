@@ -23,6 +23,7 @@ namespace ContentRepo.Editor
         [SerializeField] private string stagingPrefix = "staging";
         [SerializeField] private string productionPrefix = "production";
         [SerializeField] private bool autoPruneSupersededStagingBuilds = true;
+        [SerializeField] private int productionRetentionDays = 30;
 
         public UploadProviderType ProviderType => providerType;
         public string S3BucketName => s3BucketName;
@@ -34,6 +35,9 @@ namespace ContentRepo.Editor
         /// <summary>When true, a staging upload deletes the previous staging build's bundles (unless
         /// production references them or they're in the delete-schedule). Keeps staging lean.</summary>
         public bool AutoPruneSupersededStagingBuilds => autoPruneSupersededStagingBuilds;
+        /// <summary>Days a superseded PRODUCTION build is kept (for rollback) before the cleanup Lambda
+        /// deletes it. On promotion, the previous production build is scheduled for deletion after this window.</summary>
+        public int ProductionRetentionDays => productionRetentionDays;
 
         public string GetEnvironmentPrefix(BuildEnvironment env) => env switch
         {
@@ -82,6 +86,7 @@ namespace ContentRepo.Editor
                     container.Add(new PropertyField(so.FindProperty("stagingPrefix"), "Staging environment prefix"));
                     container.Add(new PropertyField(so.FindProperty("productionPrefix"), "Production environment prefix"));
                     container.Add(new PropertyField(so.FindProperty("autoPruneSupersededStagingBuilds"), "Auto-prune superseded staging builds"));
+                    container.Add(new PropertyField(so.FindProperty("productionRetentionDays"), "Production retention (days)"));
 
                     var loginBtn = new Button(AwsLoginWindow.Open)
                     {
