@@ -202,7 +202,7 @@ namespace ContentRepo
                         case LocalDevMode.AssetDatabase:
                             // Fast Mode: Addressables' AssetDatabase provider resolves assets
                             // directly — no catalog fetch needed.
-                            Debug.Log($"[ContentRepo] LOCAL DEV (AssetDatabase): skipping catalog for '{entry.name}'.");
+                            Debug.Log($"[ContentRepo] '{entry.name}' resolved from LOCAL AssetDatabase (Fast Mode) — not downloaded.");
                             item.Success = true;
                             results.Add(item);
                             continue;
@@ -224,6 +224,7 @@ namespace ContentRepo
                     && !string.IsNullOrEmpty(loadedBuildId))
                 {
                     item.Success = true;
+                    Debug.Log($"[ContentRepo] '{entry.name}' already resolved this session (build {loadedBuildId} unchanged) — reusing.");
                     results.Add(item);
                     continue;
                 }
@@ -251,6 +252,12 @@ namespace ContentRepo
                     item.Locator = locator;
                     item.Success = true;
                     LoadedVersions[cacheKey] = platformEntry.buildId ?? "";
+
+                    var fromLocalBundles = ContentLocalDevOverrides.TryGet(entry.name, out var srcOverride)
+                                           && srcOverride.Mode == LocalDevMode.LocalBundles;
+                    Debug.Log(fromLocalBundles
+                        ? $"[ContentRepo] '{entry.name}' resolved from LOCAL BUNDLES (build {platformEntry.buildId}) — catalog: {item.CatalogUrl}"
+                        : $"[ContentRepo] '{entry.name}' resolved from the ONLINE SERVER (build {platformEntry.buildId}) — catalog: {item.CatalogUrl}");
                 }
                 catch (Exception ex)
                 {
