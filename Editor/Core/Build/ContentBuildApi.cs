@@ -119,6 +119,8 @@ namespace ContentRepo.Editor
             var previousSharedBundleGroupIndex = settings.SharedBundleSettingsCustomGroupIndex;
             var previousMonoScriptNaming      = settings.MonoScriptBundleNaming;
             var previousMonoScriptCustomName  = settings.MonoScriptBundleCustomNaming;
+            var previousBuiltInNaming         = settings.BuiltInBundleNaming;
+            var previousBuiltInCustomName     = settings.BuiltInBundleCustomNaming;
 
             // BuildPlayerContent requires the packed-mode builder (Default Build Script).
             // Play Mode Scripts (Use Asset Database / Use Existing Build) cannot produce bundles.
@@ -211,6 +213,21 @@ namespace ContentRepo.Editor
                 settings.MonoScriptBundleNaming = MonoScriptBundleNaming.Custom;
                 settings.MonoScriptBundleCustomNaming = string.Empty;
                 log?.Invoke("[Build] MonoScript bundle suppressed (provided by the client; avoids duplicate-bundle conflict).");
+
+                // Give the built-in-shaders bundle (Resources/unity_builtin_extra: default sprite shader, etc.)
+                // a UNIQUE internal name per package. Unlike MonoScripts it can't be suppressed — but it can be
+                // uniquely named. The conflict is NOT the external filename (already differs) but the bundle's
+                // *internal* identity: GetBuiltInBundleNamePrefix uses settings.BuiltInBundleNaming, whose
+                // default (ProjectName) is Hash128(projectName) — identical for the client build and every
+                // content build. Two bundles sharing that internal name but holding the same unity_builtin_extra
+                // objects make Unity refuse the second at runtime ("another AssetBundle with the same files is
+                // already loaded"). DefaultGroupGuid wouldn't help (same default group as the client), so use a
+                // Custom prefix keyed to the package: unique vs the client AND vs other packages. The 19 KB
+                // bundle is duplicated in memory, which is negligible and the community-standard fix for
+                // multi-catalog built-in-shader conflicts.
+                settings.BuiltInBundleNaming = BuiltInBundleNaming.Custom;
+                settings.BuiltInBundleCustomNaming = $"contentrepo_{contentPackageName}";
+                log?.Invoke($"[Build] Built-in-shaders bundle named uniquely for '{contentPackageName}' (avoids cross-catalog duplicate-bundle conflict).");
 
                 // Wipe the Addressables build output so stale bundles from previous runs
                 // don't mix in, keeping the buildId deterministic across identical builds.
@@ -306,6 +323,8 @@ namespace ContentRepo.Editor
                 settings.SharedBundleSettingsCustomGroupIndex = previousSharedBundleGroupIndex;
                 settings.MonoScriptBundleNaming = previousMonoScriptNaming;
                 settings.MonoScriptBundleCustomNaming = previousMonoScriptCustomName;
+                settings.BuiltInBundleNaming = previousBuiltInNaming;
+                settings.BuiltInBundleCustomNaming = previousBuiltInCustomName;
                 if (previousRemoteCatalogBuildId != null)
                     settings.RemoteCatalogBuildPath.SetVariableById(settings, previousRemoteCatalogBuildId);
                 if (previousRemoteCatalogLoadId != null)
