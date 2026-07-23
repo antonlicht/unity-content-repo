@@ -383,6 +383,11 @@ namespace ContentRepo.Editor
             var groupMetaRelPath = $"{GroupsFolderName}/{folder}.asset.meta";
             var schemaGlob       = $"{GroupsFolderName}/{folder}_*"; // schema assets that travel with the group
 
+            // A prior disconnect marks these files skip-worktree and removes them; clear that first so
+            // `git checkout` can actually repopulate them below.
+            await ClearSkipWorktreeAsync($"{GroupsFolderName}/{folder}.*");
+            await ClearSkipWorktreeAsync(schemaGlob);
+
             // git checkout HEAD -- <path> restores the file to the last committed state. The group
             // asset warns if genuinely absent; the meta and schema files may legitimately not be
             // committed yet (schemas move into _groups/ only on the first build/play), so ignore those.
@@ -431,12 +436,49 @@ namespace ContentRepo.Editor
             }
 
             // Drop the package's Addressables group from the project so it doesn't orphan (its assets
-            // are gone). The committed _groups/<folder>.asset stays on disk and is re-registered on
-            // the next checkout, so this is reversible.
+            // are gone), then remove its committed group + schema files from the worktree too. This is
+            // reversible: the next checkout restores them from HEAD and re-registers the group.
             RemoveContentGroupFromSettings(folder);
+            await RemoveGroupFilesFromWorktreeAsync(folder);
 
             NotifyChange();
             AssetDatabase.Refresh();
+        }
+
+        /// <summary>
+        /// Removes the package's committed group + schema files from <c>_groups/</c> on disconnect.
+        /// Tracked files are marked <c>skip-worktree</c> before deletion so git treats them as
+        /// intentionally-absent (like sparse-checkout) rather than reporting a deletion — otherwise a
+        /// "commit all" in an external git client could drop the group repo-wide. Cleared and restored
+        /// on the next checkout (see <see cref="RestoreGroupAssetAsync"/>).
+        /// </summary>
+        private static async Task RemoveGroupFilesFromWorktreeAsync(string folder)
+        {
+            try
+            {
+                var groupFiles = GetGroupRelativePaths(folder).ToList(); // on-disk group + schema files
+                if (groupFiles.Count == 0) return;
+
+                // Mark tracked ones skip-worktree so their removal is invisible to git.
+                var listed = await RunGitCommandAsync(
+                    $"ls-files -- {string.Join(" ", groupFiles.Select(Quote))}", ContentAbsolutePath, silent: true);
+                var tracked = listed
+                    .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+                for (var i = 0; i < tracked.Count; i += 100)
+                    await RunGitCommandAsync(
+                        $"update-index --skip-worktree -- {string.Join(" ", tracked.Skip(i).Take(100).Select(Quote))}",
+                        ContentAbsolutePath);
+
+                foreach (var rel in groupFiles)
+                {
+                    var abs = Path.Combine(ContentAbsolutePath, rel.Replace('/', Path.DirectorySeparatorChar));
+                    try { if (File.Exists(abs)) File.Delete(abs); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not delete group file '{abs}': {ex.Message}"); }
+                }
+                Debug.Log($"[ContentRepo] Removed group + schema files for '{folder}' from the worktree (skip-worktree; restored on checkout).");
+            }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not remove group files for '{folder}': {ex.Message}"); }
         }
 
         /// <summary>Removes the package's Addressables group from the active settings without deleting
