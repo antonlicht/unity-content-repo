@@ -381,11 +381,12 @@ namespace ContentRepo.Editor
         {
             var groupRelPath     = $"{GroupsFolderName}/{folder}.asset";
             var groupMetaRelPath = $"{GroupsFolderName}/{folder}.asset.meta";
+            var schemaGlob       = $"{GroupsFolderName}/{folder}_*"; // schema assets that travel with the group
 
             // git checkout HEAD -- <path> restores the file to the last committed state.
             // Silently ignore paths that don't exist in HEAD yet (e.g. first-ever checkout
-            // before any build has committed the group file).
-            foreach (var relPath in new[] { groupRelPath, groupMetaRelPath })
+            // before any build has committed the group/schema files).
+            foreach (var relPath in new[] { groupRelPath, groupMetaRelPath, schemaGlob })
             {
                 try
                 {
@@ -982,7 +983,7 @@ namespace ContentRepo.Editor
             if (!Directory.Exists(groupsDir)) yield break;
 
             var exactPrefix  = folder + ".";          // <folder>.asset  / <folder>.asset.meta
-            var schemaPrefix = folder + "_schema_";   // <folder>_schema_*.asset (if Unity writes them separately)
+            var schemaPrefix = folder + "_";          // <folder>_BundledAssetGroupSchema.asset + .meta (schemas travel in _groups/)
 
             foreach (var absPath in Directory.GetFiles(groupsDir))
             {

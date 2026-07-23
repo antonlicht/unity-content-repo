@@ -489,6 +489,10 @@ namespace ContentRepo.Editor
                     log?.Invoke($"[Build] Group file is at '{targetGroupPath}' (in content repo, commit with other changes).");
             }
 
+            // Move the group's schema assets into _groups/ too, so they travel with the content repo
+            // instead of dangling references into the main project's Schemas folder (see below).
+            MoveGroupSchemasIntoContentRepo(group, groupsFolder, log);
+
             schemaCfg.IncludeInBuild = true;
 
             // Sync entries without resetting addresses: remove stale entries (assets deleted from
@@ -510,6 +514,35 @@ namespace ContentRepo.Editor
             AssetDatabase.SaveAssets();
             log?.Invoke($"[Build] Group '{contentPackageName}': {group.entries.Count} asset(s) ({added} added, {existingGuids.Count - (guidSet.Count - added)} removed) from {contentAssetPath}");
             return group;
+        }
+
+        /// <summary>
+        /// Moves a group's schema assets into the content repo's <c>_groups/</c> folder. Addressables
+        /// stores each group schema as a *separate* asset (by default in the project's
+        /// AddressableAssetsData/…/Schemas folder), referenced from the group by GUID. Because the
+        /// group file lives in the content repo but the schemas do not, after a fresh checkout those
+        /// references dangle and <c>group.GetSchema&lt;T&gt;()</c> returns null (the build then NRE'd).
+        /// Relocating the schemas next to the group makes them travel and be committed together;
+        /// <see cref="AssetDatabase.MoveAsset"/> preserves each schema's GUID so the references stay valid.
+        /// </summary>
+        public static void MoveGroupSchemasIntoContentRepo(AddressableAssetGroup group, string groupsFolder, BuildLogHandler log = null)
+        {
+            if (group == null) return;
+            foreach (var schema in group.Schemas.ToArray())
+            {
+                if (schema == null) continue;
+                var currentPath = AssetDatabase.GetAssetPath(schema);
+                if (string.IsNullOrEmpty(currentPath)) continue;
+
+                var targetPath = $"{groupsFolder}/{Path.GetFileName(currentPath)}";
+                if (string.Equals(currentPath.Replace('\\', '/'), targetPath, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var err = AssetDatabase.MoveAsset(currentPath, targetPath);
+                if (!string.IsNullOrEmpty(err))
+                    log?.Invoke($"[ContentRepo] WARNING: could not move schema '{Path.GetFileName(currentPath)}' into {groupsFolder}: {err}");
+                else
+                    log?.Invoke($"[ContentRepo] Moved schema '{Path.GetFileName(currentPath)}' into the content repo (travels with the group).");
+            }
         }
 
         private static void DeactivateTemporaryGroup(AddressableAssetSettings settings,
