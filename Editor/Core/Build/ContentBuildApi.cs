@@ -117,6 +117,8 @@ namespace ContentRepo.Editor
             var previousBuilderIndex          = settings.ActivePlayerDataBuilderIndex;
             var previousSharedBundleSettings  = settings.SharedBundleSettings;
             var previousSharedBundleGroupIndex = settings.SharedBundleSettingsCustomGroupIndex;
+            var previousMonoScriptNaming      = settings.MonoScriptBundleNaming;
+            var previousMonoScriptCustomName  = settings.MonoScriptBundleCustomNaming;
 
             // BuildPlayerContent requires the packed-mode builder (Default Build Script).
             // Play Mode Scripts (Use Asset Database / Use Existing Build) cannot produce bundles.
@@ -197,6 +199,18 @@ namespace ContentRepo.Editor
                     log?.Invoke($"[Build] WARNING: could not locate group '{contentPackageName}' in settings.groups to host shared bundles; " +
                                 "built-in/MonoScript bundles may fall back to the Default group's local paths and fail to load at runtime.");
                 }
+
+                // Suppress the per-package MonoScript bundle. Content packages are DLC that always run inside
+                // the full client, which already ships (and loads) an identical monoscripts bundle. Building
+                // our own copy makes Unity refuse it at runtime — "another AssetBundle with the same files is
+                // already loaded" — because it holds the same MonoScript objects. The client's copy provides
+                // those types (same GUIDs, same assemblies), so the package doesn't need its own. Custom naming
+                // with an empty prefix makes GetMonoScriptBundleNamePrefix return "" → no monoscripts bundle is
+                // created (BuildScriptPackedMode only builds it when the prefix is non-empty). The built-in
+                // shaders (unitybuiltinassets) bundle is handled separately.
+                settings.MonoScriptBundleNaming = MonoScriptBundleNaming.Custom;
+                settings.MonoScriptBundleCustomNaming = string.Empty;
+                log?.Invoke("[Build] MonoScript bundle suppressed (provided by the client; avoids duplicate-bundle conflict).");
 
                 // Wipe the Addressables build output so stale bundles from previous runs
                 // don't mix in, keeping the buildId deterministic across identical builds.
@@ -290,6 +304,8 @@ namespace ContentRepo.Editor
                 settings.ActivePlayerDataBuilderIndex = previousBuilderIndex;
                 settings.SharedBundleSettings = previousSharedBundleSettings;
                 settings.SharedBundleSettingsCustomGroupIndex = previousSharedBundleGroupIndex;
+                settings.MonoScriptBundleNaming = previousMonoScriptNaming;
+                settings.MonoScriptBundleCustomNaming = previousMonoScriptCustomName;
                 if (previousRemoteCatalogBuildId != null)
                     settings.RemoteCatalogBuildPath.SetVariableById(settings, previousRemoteCatalogBuildId);
                 if (previousRemoteCatalogLoadId != null)
