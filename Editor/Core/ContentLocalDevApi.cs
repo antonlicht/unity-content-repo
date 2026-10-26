@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Build.DataBuilders;
 using UnityEditor.AddressableAssets.Settings;
 using UnityEditor.AddressableAssets.Settings.GroupSchemas;
 using UnityEngine;
@@ -67,14 +68,10 @@ namespace ContentRepo.Editor
             foreach (var entry in group.entries)
                 entry.SetLabel(packageName, enable: true, force: false, postEvent: false);
 
-            AssetDatabase.SaveAssets();
+            ContentAssetSaving.SaveGroup(group);
+            ContentAssetSaving.SaveSettings(settings);
 
-            // Switch Play Mode Script to "Use Asset Database" (index 0).
-            if (settings.ActivePlayerDataBuilderIndex != 0)
-            {
-                settings.ActivePlayerDataBuilderIndex = 0;
-                log?.Invoke("[LocalDev] Switched Play Mode Script to 'Use Asset Database (fastest)'.");
-            }
+            ContentAssetSaving.UsePlayModeScript<BuildScriptFastMode>(settings, log);
 
             ContentLocalDevOverrides.Register(packageName, LocalDevMode.AssetDatabase);
             SaveToPrefs();
@@ -96,7 +93,7 @@ namespace ContentRepo.Editor
         /// <see cref="ContentRepoRuntime.LoadCatalogsAsync"/> uses the local catalog instead of
         /// the CDN URL for this package.
         ///
-        /// Requires Play Mode Script = "Use Existing Build" (index 2).
+        /// Requires Play Mode Script = "Use Existing Build" (a per-user setting).
         /// Automatically switches to that script.
         /// </summary>
         public static async Task<ContentBuildResult> BuildAndRegisterLocalBundlesAsync(
@@ -121,13 +118,7 @@ namespace ContentRepo.Editor
 
             var catalogUrl = "file:///" + catalogFile.Replace('\\', '/');
 
-            // Switch Play Mode Script to "Use Existing Build" (index 2).
-            var settings = AddressableAssetSettingsDefaultObject.Settings;
-            if (settings != null && settings.ActivePlayerDataBuilderIndex != 2)
-            {
-                settings.ActivePlayerDataBuilderIndex = 2;
-                log?.Invoke("[LocalDev] Switched Play Mode Script to 'Use Existing Build'.");
-            }
+            ContentAssetSaving.UsePlayModeScript<BuildScriptPackedPlayMode>(AddressableAssetSettingsDefaultObject.Settings, log);
 
             ContentLocalDevOverrides.Register(packageName, LocalDevMode.LocalBundles, catalogUrl);
             SaveToPrefs();
