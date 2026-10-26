@@ -109,6 +109,8 @@ namespace ContentRepo.Editor
                     $"Addressables profile '{buildSettings.AddressablesProfileName}' not found. " +
                     $"Configure it under Project Settings > Content Repo > Build.");
 
+            var settingsWasDirty              = EditorUtility.IsDirty(settings);
+            var settingsFingerprint           = ContentAssetSaving.Fingerprint(settings);
             var previousActiveProfile         = settings.activeProfileId;
             var previousPlayerVersion         = settings.OverridePlayerVersion;
             var previousBuildRemoteCatalog    = settings.BuildRemoteCatalog;
@@ -327,7 +329,9 @@ namespace ContentRepo.Editor
                 if (previousRemoteCatalogLoadId != null)
                     settings.RemoteCatalogLoadPath.SetVariableById(settings, previousRemoteCatalogLoadId);
 
-                AssetDatabase.SaveAssets();
+                ContentAssetSaving.SaveGroup(tempGroup);
+                foreach (var group in disabledStates.Keys) ContentAssetSaving.SaveGroup(group);
+                ContentAssetSaving.SaveSettingsIfChanged(settings, settingsFingerprint, settingsWasDirty);
 
                 try { OnBuildComplete?.Invoke(result); }
                 catch (Exception ex) { Debug.LogException(ex); }
@@ -578,7 +582,7 @@ namespace ContentRepo.Editor
             foreach (var entry in group.entries)
                 entry.SetLabel(contentPackageName, enable: true, force: false, postEvent: false);
 
-            AssetDatabase.SaveAssets();
+            ContentAssetSaving.SaveGroup(group);
             log?.Invoke($"[Build] Group '{contentPackageName}': {group.entries.Count} asset(s) ({added} added, {existingGuids.Count - (guidSet.Count - added)} removed) from {contentAssetPath}");
             return group;
         }
@@ -620,7 +624,7 @@ namespace ContentRepo.Editor
             {
                 var schema = group.GetSchema<BundledAssetGroupSchema>();
                 if (schema != null) schema.IncludeInBuild = false;
-                AssetDatabase.SaveAssets();
+                ContentAssetSaving.SaveGroup(group);
                 log?.Invoke($"[Build] Deactivated group '{group.Name}' (IncludeInBuild = false)");
             }
             catch (Exception ex)

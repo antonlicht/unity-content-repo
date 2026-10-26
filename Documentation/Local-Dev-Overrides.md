@@ -30,8 +30,10 @@ Two override modes are available:
 2. Labels every entry with the package name.
 3. Registers an **AssetDatabase** override for the package (unless it already has a `LocalBundles`
    override, which is preserved).
-4. Switches the Addressables **Play Mode Script** to *Use Asset Database (fastest)* (index 0) — or to
-   *Use Existing Build* (index 2) if any checked-out package has a `LocalBundles` override.
+4. Switches the Addressables **Play Mode Script** to *Use Asset Database (fastest)* — or to
+   *Use Existing Build* if any checked-out package has a `LocalBundles` override. The script is chosen
+   by builder type, not index, and the Play Mode Script is a per-user setting, so nothing in the
+   project's tracked `AddressableAssetSettings.asset` changes (the player-build builder is left alone).
 
 The practical effect: **checked-out packages just work in Play Mode with no manual step** — their
 assets are served straight from the AssetDatabase, even for brand-new packages that have never been
@@ -83,10 +85,10 @@ packages absent from the manifest.
 `ContentLocalDevApi` (in `ContentRepo.Editor`) provides the setup methods and the persistence layer:
 
 - **`SetupForFastMode(packageName)`** — creates/refreshes the Addressables group, labels every
-  entry with `packageName`, switches the Play Mode Script to index 0, and registers the override.
+  entry with `packageName`, switches the Play Mode Script to *Use Asset Database*, and registers the override.
 - **`BuildAndRegisterLocalBundlesAsync(packageName)`** — runs a full build, rewrites the catalog's
-  load paths from the CDN placeholder to `file://` paths, switches the Play Mode Script to index 2,
-  and registers the override.
+  load paths from the CDN placeholder to `file://` paths, switches the Play Mode Script to *Use Existing
+  Build*, and registers the override.
 - **`ClearFastMode` / `ClearLocalBundles` / `ClearOverride`** — remove the override from the registry
   and save to `EditorPrefs`.
 - **`EnsureGroupPopulated`** — the shared helper that creates/syncs a package's Addressables group

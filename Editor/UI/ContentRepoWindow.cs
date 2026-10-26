@@ -1204,6 +1204,7 @@ namespace ContentRepo.Editor
             }
 
             var anyStale = false;
+            var cleaned = new List<UnityEditor.AddressableAssets.Settings.AddressableAssetGroup>();
             foreach (var group in addressableSettings.groups.ToList())
             {
                 if (group == null || group == defaultGroup) continue;
@@ -1214,11 +1215,15 @@ namespace ContentRepo.Editor
                 if (stale.Count == 0) continue;
                 foreach (var e in stale) group.RemoveAssetEntry(e, postEvent: false);
                 Debug.Log($"[ContentRepo] Removed {stale.Count} missing reference(s) from group '{group.name}'.");
+                cleaned.Add(group);
                 anyStale = true;
             }
 
             if (toRemove.Any(g => g != null) || anyStale)
-                AssetDatabase.SaveAssets();
+            {
+                foreach (var group in cleaned) ContentAssetSaving.SaveGroup(group);
+                ContentAssetSaving.SaveSettings(addressableSettings);
+            }
         }
 
         private static void MergeGroupsStatusInto(IReadOnlyList<string> packages, Dictionary<string, FolderStatus> statuses)

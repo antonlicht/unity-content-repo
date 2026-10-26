@@ -2,6 +2,7 @@
 using System.Linq;
 using UnityEditor;
 using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Build.DataBuilders;
 using UnityEngine;
 
 namespace ContentRepo.Editor
@@ -19,8 +20,9 @@ namespace ContentRepo.Editor
     /// In addition, every checked-out package that does not already have a
     /// <see cref="LocalDevMode.LocalBundles"/> override registered is automatically registered
     /// as <see cref="LocalDevMode.AssetDatabase"/>. When at least one such package is found the
-    /// Addressables Play Mode Script is switched to <em>Use Asset Database (fastest)</em>
-    /// (index 0) so the assets are served directly without any bundle build.
+    /// Addressables Play Mode Script (a per-user setting) is switched to <em>Use Asset Database
+    /// (fastest)</em> so the assets are served directly without any bundle build, or to
+    /// <em>Use Existing Build</em> when a package has a LocalBundles override.
     ///
     /// The check runs on <see cref="PlayModeStateChange.ExitingEditMode"/> so it is always
     /// up-to-date before any test or game session starts, without requiring manual action
@@ -61,6 +63,7 @@ namespace ContentRepo.Editor
 
             var anyChange = false;
             var anyLocalPackage = false;
+            var changedGroups = new System.Collections.Generic.List<UnityEditor.AddressableAssets.Settings.AddressableAssetGroup>();
             foreach (var folderPath in subFolders)
             {
                 var packageName = System.IO.Path.GetFileName(folderPath);
@@ -86,6 +89,7 @@ namespace ContentRepo.Editor
                         {
                             foreach (var entry in group.entries)
                                 entry.SetLabel(packageName, true, true, false);
+                            changedGroups.Add(group);
                         }
 
                         anyChange = true;
@@ -113,14 +117,16 @@ namespace ContentRepo.Editor
             }
 
             if (anyChange)
-                AssetDatabase.SaveAssets();
+            {
+                foreach (var group in changedGroups) ContentAssetSaving.SaveGroup(group);
+                ContentAssetSaving.SaveSettings(addressableSettings);
+            }
 
             if (anyLocalPackage)
                 ContentLocalDevApi.SaveToPrefs();
 
-            // Switch Play Mode Script to match the dominant local-dev mode.
-            // If any package uses LocalBundles we stay on "Use Existing Build" (2);
-            // otherwise switch to "Use Asset Database (fastest)" (0).
+            // Switch the per-user Play Mode Script to match the dominant local-dev mode:
+            // "Use Existing Build" if any package uses LocalBundles, otherwise "Use Asset Database".
             if (anyLocalPackage)
             {
                 var hasLocalBundles = false;
@@ -136,13 +142,8 @@ namespace ContentRepo.Editor
                     }
                 }
 
-                var targetIndex = hasLocalBundles ? 2 : 0;
-                if (addressableSettings.ActivePlayerDataBuilderIndex != targetIndex)
-                {
-                    addressableSettings.ActivePlayerDataBuilderIndex = targetIndex;
-                    var modeName = targetIndex == 0 ? "Use Asset Database (fastest)" : "Use Existing Build (requires built groups)";
-                    Debug.Log($"[ContentRepo] Auto-setup: switched Addressables Play Mode Script to '{modeName}'.");
-                }
+                if (hasLocalBundles) ContentAssetSaving.UsePlayModeScript<BuildScriptPackedPlayMode>(addressableSettings, Debug.Log);
+                else ContentAssetSaving.UsePlayModeScript<BuildScriptFastMode>(addressableSettings, Debug.Log);
             }
         }
 

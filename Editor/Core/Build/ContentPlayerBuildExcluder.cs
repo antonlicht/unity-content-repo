@@ -95,9 +95,12 @@ namespace ContentRepo.Editor
             EditorApplication.update -= RestoreWhenIdle;
             if (disabled.Count == 0) return;
             foreach (var schema in disabled)
-                if (schema != null) schema.IncludeInBuild = true;
+            {
+                if (schema == null) continue;
+                schema.IncludeInBuild = true;
+                AssetDatabase.SaveAssetIfDirty(schema);
+            }
             disabled.Clear();
-            AssetDatabase.SaveAssets();
         }
     }
 }
