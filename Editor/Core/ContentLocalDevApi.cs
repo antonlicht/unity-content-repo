@@ -222,45 +222,9 @@ namespace ContentRepo.Editor
             if (guids.Length == 0)
                 log?.Invoke($"[LocalDev] No assets found under '{contentAssetPath}'. The group will be created empty and populated once assets are added.");
 
-            var groupsFolder = $"{repoLocalPath}/{ContentGitApi.GroupsFolderName}";
-
-            var group = settings.FindGroup(packageName);
-            if (group == null)
-            {
-                group = settings.CreateGroup(
-                    packageName,
-                    setAsDefaultGroup: false,
-                    readOnly: false,
-                    postEvent: false,
-                    schemasToCopy: null,
-                    typeof(BundledAssetGroupSchema));
-                log?.Invoke($"[LocalDev] Created Addressables group '{packageName}'.");
-            }
-            else
-            {
-                log?.Invoke($"[LocalDev] Refreshing Addressables group '{packageName}'.");
-            }
-
-            // Ensure the group file lives in _groups/ in the content repo so it can be
-            // committed and sparse-checked-out independently of the package content.
-            // AssetDatabase.MoveAsset preserves the GUID, keeping bundle hashes stable.
-            var targetGroupPath  = $"{groupsFolder}/{packageName}.asset";
-            var currentGroupPath = AssetDatabase.GetAssetPath(group);
-            if (!string.Equals(currentGroupPath.Replace('\\', '/'), targetGroupPath, StringComparison.OrdinalIgnoreCase))
-            {
-                if (!AssetDatabase.IsValidFolder(groupsFolder))
-                    AssetDatabase.CreateFolder(repoLocalPath, ContentGitApi.GroupsFolderName);
-
-                var moveError = AssetDatabase.MoveAsset(currentGroupPath, targetGroupPath);
-                if (!string.IsNullOrEmpty(moveError))
-                    log?.Invoke($"[LocalDev] WARNING: Could not move group file to '{targetGroupPath}': {moveError}. " +
-                                "The group still works but won't benefit from content-repo sparse-checkout.");
-                else
-                    log?.Invoke($"[LocalDev] Group file is at '{targetGroupPath}'.");
-            }
-
-            // Relocate the group's schema assets into _groups/ too so they travel with the content repo.
-            ContentBuildApi.MoveGroupSchemasIntoContentRepo(group, groupsFolder, log);
+            var group = ContentGroupRegistry.Resolve(settings, packageName, create: true, log);
+            ContentGroupRegistry.MoveSchemasIntoGroupsFolder(group, log);
+            log?.Invoke($"[LocalDev] Refreshing Addressables group '{packageName}'.");
 
             // Sync entries: add new assets, remove stale ones, leave existing ones untouched
             // (preserves any custom addresses set by content authors).

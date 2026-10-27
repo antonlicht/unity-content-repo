@@ -362,7 +362,7 @@ namespace ContentRepo.Editor
                 }
             }
 
-            CleanupOrphanAddressableGroups(remoteFolders, diskFolders);
+            ContentGroupRegistry.Reconcile();
         }
 
         private async Task RefreshManifestsAsync()
@@ -1181,59 +1181,6 @@ namespace ContentRepo.Editor
         private void SetStatus(string msg) { if (statusLabel != null) statusLabel.text = msg; }
 
         // ── Static data helpers ───────────────────────────────────────────────
-
-        private static void CleanupOrphanAddressableGroups(
-            IReadOnlyList<string> remoteFolders,
-            IReadOnlyList<string> diskFolders)
-        {
-            var addressableSettings = UnityEditor.AddressableAssets.AddressableAssetSettingsDefaultObject.Settings;
-            if (addressableSettings == null) return;
-
-            // DefaultGroup throws when Addressables hasn't been fully initialized (fresh project,
-            // no default group configured). Resolve it once with a safe fallback so per-group
-            // IsDefaultGroup() calls don't blow up the whole cleanup.
-            UnityEditor.AddressableAssets.Settings.AddressableAssetGroup defaultGroup = null;
-            try { defaultGroup = addressableSettings.DefaultGroup; }
-            catch { /* no default group configured yet */ }
-
-            var known = new HashSet<string>(remoteFolders.Concat(diskFolders), StringComparer.OrdinalIgnoreCase);
-            var groupsFolderSegment = $"/{ContentGitApi.GroupsFolderName}/";
-
-            var toRemove = addressableSettings.groups
-                .Where(g => g != null && g != defaultGroup && !known.Contains(g.name))
-                .ToList();
-
-            foreach (var group in toRemove)
-            {
-                var assetPath = AssetDatabase.GetAssetPath(group);
-                if (string.IsNullOrEmpty(assetPath)) continue;
-                if (!assetPath.Replace('\\', '/').Contains(groupsFolderSegment)) continue;
-                Debug.Log($"[ContentRepo] Removing orphan Addressables group '{group.name}' — package no longer exists.");
-                addressableSettings.RemoveGroup(group);
-            }
-
-            var anyStale = false;
-            var cleaned = new List<UnityEditor.AddressableAssets.Settings.AddressableAssetGroup>();
-            foreach (var group in addressableSettings.groups.ToList())
-            {
-                if (group == null || group == defaultGroup) continue;
-                var assetPath2 = AssetDatabase.GetAssetPath(group);
-                if (string.IsNullOrEmpty(assetPath2)) continue;
-                if (!assetPath2.Replace('\\', '/').Contains(groupsFolderSegment)) continue;
-                var stale = group.entries.Where(e => string.IsNullOrEmpty(AssetDatabase.GUIDToAssetPath(e.guid))).ToList();
-                if (stale.Count == 0) continue;
-                foreach (var e in stale) group.RemoveAssetEntry(e, postEvent: false);
-                Debug.Log($"[ContentRepo] Removed {stale.Count} missing reference(s) from group '{group.name}'.");
-                cleaned.Add(group);
-                anyStale = true;
-            }
-
-            if (toRemove.Any(g => g != null) || anyStale)
-            {
-                foreach (var group in cleaned) ContentAssetSaving.SaveGroup(group);
-                ContentAssetSaving.SaveSettings(addressableSettings);
-            }
-        }
 
         private static void MergeGroupsStatusInto(IReadOnlyList<string> packages, Dictionary<string, FolderStatus> statuses)
         {

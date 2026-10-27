@@ -76,6 +76,8 @@ namespace ContentRepo.Editor
             string contentPackageName, BuildLogHandler log = null)
         {
             ValidatePackageName(contentPackageName);
+            using var buildScope = ContentGroupRegistry.BuildScope();
+            ContentGroupRegistry.Reconcile();
 
             // Let subscribers finalize the package's group first (e.g. relocate Naninovel voice-map
             // entries into it) so the build is deterministic rather than reliant on an editor tick.
@@ -191,6 +193,7 @@ namespace ContentRepo.Editor
                 // fails to load. Pointing SharedBundleSettings at the temp group makes them build to
                 // ServerData, upload with the package, and load from the remote placeholder → CDN. Each
                 // package carries its own copy (self-contained), which is what OTA delivery needs.
+                settings.groups.Sort((a, b) => string.CompareOrdinal(a?.Guid, b?.Guid));
                 var sharedGroupIndex = settings.groups.IndexOf(tempGroup);
                 if (sharedGroupIndex >= 0)
                 {
@@ -310,6 +313,7 @@ namespace ContentRepo.Editor
                 // Restore all previously-disabled groups.
                 foreach (var kv in disabledStates)
                 {
+                    if (kv.Key == tempGroup) continue;
                     var schema = kv.Key.GetSchema<BundledAssetGroupSchema>();
                     if (schema != null) schema.IncludeInBuild = kv.Value;
                 }
@@ -492,28 +496,10 @@ namespace ContentRepo.Editor
                 throw new InvalidOperationException(
                     $"No assets found under '{contentAssetPath}'. Check the folder contains importable assets.");
 
-            // Group is simply named after the content package — no prefix needed since the
-            // group file lives in _groups/ which already provides the namespace.
-            var groupsFolder = $"{repoLocalPath}/{ContentGitApi.GroupsFolderName}";
-
-            // Reuse an existing group to keep its GUID stable — bundle hashes are derived from
-            // the GUID, so recreating gives a different hash for identical content.
-            var group = settings.FindGroup(contentPackageName);
-            if (group == null)
-            {
-                group = settings.CreateGroup(
-                    contentPackageName,
-                    setAsDefaultGroup: false,
-                    readOnly: false,
-                    postEvent: false,
-                    schemasToCopy: null,
-                    typeof(BundledAssetGroupSchema));
-                log?.Invoke($"[Build] Created group '{contentPackageName}'");
-            }
-            else
-            {
-                log?.Invoke($"[Build] Reusing group '{contentPackageName}' (stable GUID)");
-            }
+            // The package's group is resolved by path (_groups/<pkg>.asset), never by name: its m_GUID is the
+            // bundle identity, so the build must use the committed group or fail, never a stand-in.
+            var group = ContentGroupRegistry.Resolve(settings, contentPackageName, create: true, log);
+            log?.Invoke($"[Build] Using group '{AssetDatabase.GetAssetPath(group)}' (m_GUID {group.Guid})");
 
             // Always (re-)configure build/load paths. The group may have been created by
             // EnsureGroupPopulated (fast mode setup) which leaves the default Library path in
@@ -535,27 +521,8 @@ namespace ContentRepo.Editor
             schemaCfg.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
             schemaCfg.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
 
-            // Ensure the group file lives in _groups/ in the content repo so it can be
-            // committed and sparse-checked-out independently of the package content.
-            // AssetDatabase.MoveAsset preserves the GUID, keeping bundle hashes stable.
-            var targetGroupPath  = $"{groupsFolder}/{contentPackageName}.asset";
-            var currentGroupPath = AssetDatabase.GetAssetPath(group);
-            if (!string.Equals(currentGroupPath.Replace('\\', '/'), targetGroupPath, StringComparison.OrdinalIgnoreCase))
-            {
-                if (!AssetDatabase.IsValidFolder(groupsFolder))
-                    AssetDatabase.CreateFolder(repoLocalPath, ContentGitApi.GroupsFolderName);
-
-                var moveError = AssetDatabase.MoveAsset(currentGroupPath, targetGroupPath);
-                if (!string.IsNullOrEmpty(moveError))
-                    log?.Invoke($"[Build] WARNING: Could not move group file to '{targetGroupPath}': {moveError}. " +
-                                "Builds will still work but the file won't benefit from content-repo sparse-checkout.");
-                else
-                    log?.Invoke($"[Build] Group file is at '{targetGroupPath}' (in content repo, commit with other changes).");
-            }
-
-            // Move the group's schema assets into _groups/ too, so they travel with the content repo
-            // instead of dangling references into the main project's Schemas folder (see below).
-            MoveGroupSchemasIntoContentRepo(group, groupsFolder, log);
+            // Schemas travel with the group in _groups/ (a schema re-created above starts out elsewhere).
+            ContentGroupRegistry.MoveSchemasIntoGroupsFolder(group, log);
 
             schemaCfg.IncludeInBuild = true;
 
@@ -596,25 +563,8 @@ namespace ContentRepo.Editor
         /// Relocating the schemas next to the group makes them travel and be committed together;
         /// <see cref="AssetDatabase.MoveAsset"/> preserves each schema's GUID so the references stay valid.
         /// </summary>
-        public static void MoveGroupSchemasIntoContentRepo(AddressableAssetGroup group, string groupsFolder, BuildLogHandler log = null)
-        {
-            if (group == null) return;
-            foreach (var schema in group.Schemas.ToArray())
-            {
-                if (schema == null) continue;
-                var currentPath = AssetDatabase.GetAssetPath(schema);
-                if (string.IsNullOrEmpty(currentPath)) continue;
-
-                var targetPath = $"{groupsFolder}/{Path.GetFileName(currentPath)}";
-                if (string.Equals(currentPath.Replace('\\', '/'), targetPath, StringComparison.OrdinalIgnoreCase)) continue;
-
-                var err = AssetDatabase.MoveAsset(currentPath, targetPath);
-                if (!string.IsNullOrEmpty(err))
-                    log?.Invoke($"[ContentRepo] WARNING: could not move schema '{Path.GetFileName(currentPath)}' into {groupsFolder}: {err}");
-                else
-                    log?.Invoke($"[ContentRepo] Moved schema '{Path.GetFileName(currentPath)}' into the content repo (travels with the group).");
-            }
-        }
+        public static void MoveGroupSchemasIntoContentRepo(AddressableAssetGroup group, string groupsFolder, BuildLogHandler log = null) =>
+            ContentGroupRegistry.MoveSchemasIntoGroupsFolder(group, log);
 
         private static void DeactivateTemporaryGroup(AddressableAssetSettings settings,
             AddressableAssetGroup group, BuildLogHandler log)

@@ -26,7 +26,9 @@ Two override modes are available:
 `ContentGroupAutoSetup` ([InitializeOnLoad]) runs whenever the editor is **exiting Edit Mode**
 (i.e. about to enter Play Mode). For every checked-out content package it:
 
-1. Creates / refreshes the package's Addressables group and populates it from the folder on disk.
+1. Registers the package's group `_groups/<pkg>.asset` (in memory, see *Addressables groups and partial
+   checkouts* in Pipeline-Usage.md), creates it at that path if the package has none yet, and populates
+   it from the folder on disk.
 2. Labels every entry with the package name.
 3. Registers an **AssetDatabase** override for the package (unless it already has a `LocalBundles`
    override, which is preserved).

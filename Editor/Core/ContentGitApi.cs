@@ -439,8 +439,7 @@ namespace ContentRepo.Editor
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
-                // The group asset is now imported; re-register it if a prior disconnect removed it.
-                ReAddContentGroupToSettings(folder);
+                ContentGroupRegistry.Reconcile();
             }
         }
 
@@ -452,10 +451,28 @@ namespace ContentRepo.Editor
                 .Where(p => IsGroupFileOf(folder, Path.GetFileName(p)))
                 .ToList();
 
-            // A prior disconnect marks these files skip-worktree and removes them; clear that first so
-            // `git checkout` can actually repopulate them below.
+            // Older tool versions marked these files skip-worktree on disconnect and removed them; clear that
+            // first so `git checkout` can actually repopulate them below.
             foreach (var relPath in committed)
                 await ClearSkipWorktreeAsync(relPath);
+
+            // Older tool versions also let Addressables prune groups of packages that were not checked out.
+            // Restoring from HEAD discards that, so keep a copy of any local modification first.
+            if (committed.Count > 0)
+            {
+                var modified = SplitPaths(await RunGitCommandAsync(
+                        $"-c core.quotepath=off diff --name-only HEAD -- {string.Join(" ", committed.Select(Quote))}", ContentAbsolutePath))
+                    .Where(p => File.Exists(Path.Combine(ContentAbsolutePath, p)))
+                    .ToList();
+                if (modified.Count > 0)
+                {
+                    var backupDir = Path.Combine(ProjectRoot, "Library", "ContentRepo", "Backups", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+                    Directory.CreateDirectory(backupDir);
+                    foreach (var rel in modified)
+                        File.Copy(Path.Combine(ContentAbsolutePath, rel), Path.Combine(backupDir, Path.GetFileName(rel)), true);
+                    Debug.LogWarning($"[ContentRepo] Restored {modified.Count} locally modified group file(s) of '{folder}' from HEAD. Copies are in {backupDir}.");
+                }
+            }
 
             // git checkout HEAD -- <path> restores the file to the last committed state. The group
             // asset warns if genuinely absent; the meta and schema files may legitimately not be
@@ -475,112 +492,56 @@ namespace ContentRepo.Editor
                 await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath);
         }
 
+        /// <summary>
+        /// Removes a package from this machine's checkout. Only local state changes: the package's group is
+        /// unregistered in memory before its files disappear (so Addressables never prunes it), its group and
+        /// schema files stay in <c>_groups/</c> exactly as committed, and the committed Addressables settings
+        /// are not touched. The tracked top-level <c>&lt;pkg&gt;.meta</c> stays too; an empty folder is kept next
+        /// to it because Unity would otherwise recreate one with a warning.
+        /// </summary>
         public static async Task DisconnectFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            ContentGroupRegistry.Unregister(folder);
 
             var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var remaining = current
                 .Where(f => !f.Equals(folder, StringComparison.OrdinalIgnoreCase))
                 .Prepend(GroupsFolderName) // always keep _groups checked out
                 .Select(Quote);
-            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", remaining)}", ContentAbsolutePath);
 
-            var localFolder = Path.Combine(ContentAbsolutePath, folder);
-            if (Directory.Exists(localFolder))
-            {
-                try { Directory.Delete(localFolder, true); }
-                catch (Exception ex) { UnityEngine.Debug.LogWarning($"Failed to delete local folder '{localFolder}': {ex.Message}"); }
-            }
-
-            var meta = localFolder + ".meta";
-            if (File.Exists(meta))
-            {
-                try { File.Delete(meta); }
-                catch (Exception ex) { UnityEngine.Debug.LogWarning($"Failed to delete meta '{meta}': {ex.Message}"); }
-            }
-
-            // Drop the package's Addressables group from the project so it doesn't orphan (its assets
-            // are gone), then remove its committed group + schema files from the worktree too. This is
-            // reversible: the next checkout restores them from HEAD and re-registers the group.
-            RemoveContentGroupFromSettings(folder);
-            await RemoveGroupFilesFromWorktreeAsync(folder);
-
-            NotifyChange();
-            AssetDatabase.Refresh();
-        }
-
-        /// <summary>
-        /// Removes the package's committed group + schema files from <c>_groups/</c> on disconnect.
-        /// Tracked files are marked <c>skip-worktree</c> before deletion so git treats them as
-        /// intentionally-absent (like sparse-checkout) rather than reporting a deletion — otherwise a
-        /// "commit all" in an external git client could drop the group repo-wide. Cleared and restored
-        /// on the next checkout (see <see cref="RestoreGroupAssetAsync"/>).
-        /// </summary>
-        private static async Task RemoveGroupFilesFromWorktreeAsync(string folder)
-        {
+            AssetDatabase.StartAssetEditing();
             try
             {
-                var groupFiles = GetGroupRelativePaths(folder).ToList(); // on-disk group + schema files
-                if (groupFiles.Count == 0) return;
+                await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", remaining)}", ContentAbsolutePath);
 
-                // Mark tracked ones skip-worktree so their removal is invisible to git.
-                var listed = await RunGitCommandAsync(
-                    $"ls-files -- {string.Join(" ", groupFiles.Select(Quote))}", ContentAbsolutePath, silent: true);
-                var tracked = listed
-                    .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
-                for (var i = 0; i < tracked.Count; i += 100)
-                    await RunGitCommandAsync(
-                        $"update-index --skip-worktree -- {string.Join(" ", tracked.Skip(i).Take(100).Select(Quote))}",
-                        ContentAbsolutePath);
-
-                foreach (var rel in groupFiles)
+                var localFolder = Path.Combine(ContentAbsolutePath, folder);
+                if (Directory.Exists(localFolder))
                 {
-                    var abs = Path.Combine(ContentAbsolutePath, rel.Replace('/', Path.DirectorySeparatorChar));
-                    try { if (File.Exists(abs)) File.Delete(abs); }
-                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not delete group file '{abs}': {ex.Message}"); }
+                    try { Directory.Delete(localFolder, true); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete local folder '{localFolder}': {ex.Message}"); }
                 }
-                Debug.Log($"[ContentRepo] Removed group + schema files for '{folder}' from the worktree (skip-worktree; restored on checkout).");
+                if (File.Exists(localFolder + ".meta")) Directory.CreateDirectory(localFolder);
             }
-            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not remove group files for '{folder}': {ex.Message}"); }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+                ContentGroupRegistry.Reconcile();
+            }
         }
 
-        /// <summary>Removes the package's Addressables group from the active settings without deleting
-        /// its committed group asset (kept in <c>_groups/</c> for re-checkout).</summary>
-        private static void RemoveContentGroupFromSettings(string folder)
+        /// <summary>True when <paramref name="repoRelativePath"/> exists in the content repo's HEAD.</summary>
+        public static bool IsCommitted(string repoRelativePath)
         {
             try
             {
-                var settings = AddressableAssetSettingsDefaultObject.Settings;
-                var group = settings != null ? settings.FindGroup(folder) : null;
-                if (group == null) return;
-                settings.groups.Remove(group);
-                EditorUtility.SetDirty(settings);
-                AssetDatabase.SaveAssetIfDirty(settings);
-                Debug.Log($"[ContentRepo] Removed Addressables group '{folder}' from the project (disconnected).");
+                var output = RunGitCommandAsync($"ls-tree --name-only HEAD -- {Quote(repoRelativePath)}", ContentAbsolutePath)
+                    .GetAwaiter().GetResult();
+                return !string.IsNullOrWhiteSpace(output);
             }
-            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not remove Addressables group '{folder}': {ex.Message}"); }
-        }
-
-        /// <summary>Re-registers a package's committed group asset into the Addressables settings after
-        /// checkout, in case a prior disconnect removed it. No-op when already present or absent.</summary>
-        private static void ReAddContentGroupToSettings(string folder)
-        {
-            try
-            {
-                var settings = AddressableAssetSettingsDefaultObject.Settings;
-                if (settings == null || settings.FindGroup(folder) != null) return;
-                var localPath = ContentRepoSettings.instance.LocalPath?.Replace('\\', '/').TrimEnd('/');
-                if (string.IsNullOrEmpty(localPath)) return;
-                var group = AssetDatabase.LoadAssetAtPath<AddressableAssetGroup>($"{localPath}/{GroupsFolderName}/{folder}.asset");
-                if (group == null) return;
-                settings.groups.Add(group);
-                EditorUtility.SetDirty(settings);
-                AssetDatabase.SaveAssetIfDirty(settings);
-                Debug.Log($"[ContentRepo] Re-registered Addressables group '{folder}' after checkout.");
-            }
-            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not re-register Addressables group '{folder}': {ex.Message}"); }
+            catch { return false; }
         }
 
         public static async Task CreateFolderAsync(string folder)
@@ -635,6 +596,7 @@ namespace ContentRepo.Editor
                 return;
 
             var wasCheckedOut = await IsFolderCheckedOutAsync(oldFolder);
+            ContentGroupRegistry.Unregister(oldFolder);
 
             if (!wasCheckedOut)
             {
@@ -645,22 +607,52 @@ namespace ContentRepo.Editor
                     ContentAbsolutePath);
             }
 
+            // git refuses to move files to paths outside the sparse cone, so the new name joins it first.
+            await RunGitCommandAsync($"sparse-checkout add {Quote(newFolder)}", ContentAbsolutePath);
+
+            var renames = new List<(string from, string to)> { (oldFolder, newFolder) };
+            if (File.Exists(Path.Combine(ContentAbsolutePath, oldFolder + ".meta")))
+                renames.Add((oldFolder + ".meta", newFolder + ".meta"));
+            foreach (var groupFile in GetGroupRelativePaths(oldFolder))
+            {
+                var name = Path.GetFileName(groupFile);
+                renames.Add((groupFile, $"{GroupsFolderName}/{newFolder}{name.Substring(oldFolder.Length)}"));
+            }
+
             // Case-only rename on case-insensitive filesystems (Windows/macOS default) requires a
             // two-step mv through a temporary name, otherwise git refuses or silently no-ops.
             var caseOnly = string.Equals(oldFolder, newFolder, StringComparison.OrdinalIgnoreCase);
-            if (caseOnly)
+            foreach (var (from, to) in renames)
             {
-                var tempName = $"{oldFolder}__cs_rename_{Guid.NewGuid():N}";
-                await RunGitCommandAsync($"mv -f -- {Quote(oldFolder)} {Quote(tempName)}", ContentAbsolutePath);
-                await RunGitCommandAsync($"mv -f -- {Quote(tempName)} {Quote(newFolder)}", ContentAbsolutePath);
-            }
-            else
-            {
-                await RunGitCommandAsync($"mv -- {Quote(oldFolder)} {Quote(newFolder)}", ContentAbsolutePath);
+                if (caseOnly)
+                {
+                    var tempName = $"{from}__cs_rename_{Guid.NewGuid():N}";
+                    await RunGitCommandAsync($"mv -f -- {Quote(from)} {Quote(tempName)}", ContentAbsolutePath);
+                    await RunGitCommandAsync($"mv -f -- {Quote(tempName)} {Quote(to)}", ContentAbsolutePath);
+                }
+                else
+                {
+                    await RunGitCommandAsync($"mv -- {Quote(from)} {Quote(to)}", ContentAbsolutePath);
+                }
             }
 
+            // The group keeps its m_GUID (and so its bundle identity); only its names follow the package.
+            foreach (var (_, to) in renames.Where(r => r.to.StartsWith(GroupsFolderName + "/") && r.to.EndsWith(".asset")))
+            {
+                var abs = Path.Combine(ContentAbsolutePath, to);
+                var text = File.ReadAllText(abs)
+                    .Replace($"m_Name: {oldFolder}\n", $"m_Name: {newFolder}\n")
+                    .Replace($"m_Name: {oldFolder}\r\n", $"m_Name: {newFolder}\r\n")
+                    .Replace($"m_GroupName: {oldFolder}\n", $"m_GroupName: {newFolder}\n")
+                    .Replace($"m_GroupName: {oldFolder}\r\n", $"m_GroupName: {newFolder}\r\n")
+                    .Replace($"m_Name: {oldFolder}_", $"m_Name: {newFolder}_");
+                File.WriteAllText(abs, text);
+                await RunGitCommandAsync($"add -- {Quote(to)}", ContentAbsolutePath);
+            }
+
+            var paths = renames.SelectMany(r => new[] { r.from, r.to }).Select(Quote);
             await RunGitCommandAsync(
-                $"commit -m {Quote($"Rename {oldFolder} to {newFolder}")}",
+                $"commit -m {Quote($"Rename {oldFolder} to {newFolder}")} -- {string.Join(" ", paths)}",
                 ContentAbsolutePath);
             await TryRemoteAsync("push", () => RunGitCommandAsync(
                 $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}",
@@ -671,16 +663,18 @@ namespace ContentRepo.Editor
             var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var updated = current
                 .Select(f => string.Equals(f, oldFolder, StringComparison.OrdinalIgnoreCase) ? newFolder : f)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             if (!wasCheckedOut)
-                updated.Remove(newFolder);
+                updated.RemoveAll(f => f.Equals(newFolder, StringComparison.OrdinalIgnoreCase));
 
             updated.Insert(0, GroupsFolderName); // always keep _groups checked out
             await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", updated.Select(Quote))}", ContentAbsolutePath);
 
             NotifyChange();
             AssetDatabase.Refresh();
+            ContentGroupRegistry.Reconcile();
         }
 
         /// <summary>
@@ -838,6 +832,7 @@ namespace ContentRepo.Editor
         public static async Task DeleteRemoteFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            ContentGroupRegistry.Unregister(folder);
 
             var branch        = ContentRepoSettings.instance.Branch;
             var remoteFolders = await GetRemoteFoldersAsync();
@@ -856,13 +851,7 @@ namespace ContentRepo.Editor
                 }
 
                 await ClearSkipWorktreeAsync(folder);
-                await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
-                foreach (var relPath in GetGroupRelativePaths(folder))
-                {
-                    try { await RunGitCommandAsync($"rm -f -- {Quote(relPath)}", ContentAbsolutePath); }
-                    catch { /* group file may not be committed — fine */ }
-                }
-                await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
+                await RemoveCommittedPackageAsync(folder);
                 await TryRemoteAsync("push", () => RunGitCommandAsync(
                     $"push origin HEAD:{Quote(branch)}",
                     ContentAbsolutePath));
@@ -892,13 +881,7 @@ namespace ContentRepo.Editor
                     await ClearSkipWorktreeAsync(folder);
 
                     // git rm removes files from both index and working tree, then we commit locally.
-                    await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
-                    foreach (var relPath in GetGroupRelativePaths(folder))
-                    {
-                        try { await RunGitCommandAsync($"rm -f -- {Quote(relPath)}", ContentAbsolutePath); }
-                        catch { /* group file may not be committed — fine */ }
-                    }
-                    await RunGitCommandAsync($"commit -m {Quote("Remove " + folder)}", ContentAbsolutePath);
+                    await RemoveCommittedPackageAsync(folder);
                     // No push — the branch diverges from remote but the folder content is gone from HEAD.
                 }
                 else
@@ -963,6 +946,24 @@ namespace ContentRepo.Editor
 
             NotifyChange();
             AssetDatabase.Refresh();
+        }
+
+        /// <summary>
+        /// Removes a package's folder, its top-level .meta and its group files from the index and disk and
+        /// commits exactly those paths.
+        /// </summary>
+        private static async Task RemoveCommittedPackageAsync(string folder)
+        {
+            var paths = new List<string> { folder };
+            if (IsCommitted(folder + ".meta")) paths.Add(folder + ".meta");
+            paths.AddRange(GetGroupRelativePaths(folder).Where(IsCommitted));
+
+            await RunGitCommandAsync($"rm -rf -- {Quote(folder)}", ContentAbsolutePath);
+            foreach (var path in paths.Skip(1))
+                await RunGitCommandAsync($"rm -f -- {Quote(path)}", ContentAbsolutePath);
+            await RunGitCommandAsync(
+                $"commit -m {Quote("Remove " + folder)} -- {string.Join(" ", paths.Select(Quote))}",
+                ContentAbsolutePath);
         }
 
         public static async Task PullAllAsync()
@@ -1092,6 +1093,54 @@ namespace ContentRepo.Editor
         public static async Task<bool> RepairIndexAsync()
         {
             if (initializing) return false;
+            var repaired = await RepairIndexCoreAsync();
+            if (await RestoreHiddenSharedFilesAsync()) repaired = true;
+            return repaired;
+        }
+
+        /// <summary>
+        /// Older tool versions hid the group files of disconnected packages (skip-worktree + delete) and
+        /// deleted their tracked top-level <c>&lt;pkg&gt;.meta</c>. Group files of every package now stay on disk
+        /// exactly as committed, and the metas must stay so folder GUIDs never change. Restores both.
+        /// </summary>
+        private static async Task<bool> RestoreHiddenSharedFilesAsync()
+        {
+            var root = ContentAbsolutePath;
+            List<string> hidden, deletedMetas;
+            try
+            {
+                hidden = SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off ls-files -v -- {Quote(GroupsFolderName + "/")}", root))
+                    .Where(l => l.StartsWith("S ")).Select(l => l.Substring(2)).ToList();
+                deletedMetas = SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files --deleted", root))
+                    .Where(p => p.IndexOf('/') < 0 && p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
+            catch { return false; }
+            if (hidden.Count == 0 && deletedMetas.Count == 0) return false;
+
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                for (var i = 0; i < hidden.Count; i += 100)
+                {
+                    var batch = string.Join(" ", hidden.Skip(i).Take(100).Select(Quote));
+                    await RunGitCommandAsync($"update-index --no-skip-worktree -- {batch}", root);
+                    await RunGitCommandAsync($"checkout -- {batch}", root);
+                }
+                for (var i = 0; i < deletedMetas.Count; i += 100)
+                    await RunGitCommandAsync($"checkout -- {string.Join(" ", deletedMetas.Skip(i).Take(100).Select(Quote))}", root);
+                Debug.Log($"[ContentRepo] Restored {hidden.Count} hidden group file(s) and {deletedMetas.Count} package .meta file(s) removed by an older Disconnect.");
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.Refresh();
+            }
+            return true;
+        }
+
+        private static async Task<bool> RepairIndexCoreAsync()
+        {
             var root = ContentAbsolutePath;
             try
             {
