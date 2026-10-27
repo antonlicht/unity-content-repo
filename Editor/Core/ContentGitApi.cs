@@ -341,7 +341,9 @@ namespace ContentRepo.Editor
             try
             {
                 // -sbu: short format + branch ahead/behind + always show untracked files
-                var output = await RunGitCommandAsync("status -sbu", ContentAbsolutePath, silent: true);
+                var output = await RunGitCommandAsync("-c core.quotepath=off status -sbu", ContentAbsolutePath, silent: true);
+                if (await RefreshStatOnlyChangesAsync(output) > 0)
+                    output = await RunGitCommandAsync("-c core.quotepath=off status -sbu", ContentAbsolutePath, silent: true);
                 RepositoryAhead = 0;
                 RepositoryBehind = 0;
 
@@ -396,6 +398,44 @@ namespace ContentRepo.Editor
                 RepositoryBehind = 0;
             }
             return result;
+        }
+
+        /// <summary>
+        /// Git for Windows can keep reporting a file as modified after it was rewritten with identical bytes:
+        /// the index entry's cached stat data goes stale and <c>git update-index --refresh</c> refuses to update
+        /// it. Re-adding such a file stores the same blob and only refreshes that cached data, so the phantom is
+        /// gone for good. Only unstaged modifications without any content difference are touched; returns how many.
+        /// </summary>
+        private static async Task<int> RefreshStatOnlyChangesAsync(string statusOutput)
+        {
+            var candidates = statusOutput
+                .Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(l => l.Length > 3 && l[0] == ' ' && l[1] == 'M')
+                .Select(l => StripGitQuotes(l.Substring(3)))
+                .ToList();
+            if (candidates.Count == 0) return 0;
+
+            try
+            {
+                var root = ContentAbsolutePath;
+                var real = new HashSet<string>(StringComparer.Ordinal);
+                for (var i = 0; i < candidates.Count; i += 100)
+                    foreach (var p in SplitPaths(await RunGitCommandAsync(
+                                 $"-c core.quotepath=off diff --name-only -- {string.Join(" ", candidates.Skip(i).Take(100).Select(Quote))}", root)))
+                        real.Add(p);
+
+                var phantoms = candidates.Where(p => !real.Contains(p)).ToList();
+                for (var i = 0; i < phantoms.Count; i += 100)
+                {
+                    var batch = string.Join(" ", phantoms.Skip(i).Take(100).Select(Quote));
+                    await RunGitCommandAsync($"add -- {batch}", root);
+                    var staged = SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off diff --cached --name-only -- {batch}", root));
+                    if (staged.Count > 0)
+                        await RunGitCommandAsync($"reset -q -- {string.Join(" ", staged.Select(Quote))}", root);
+                }
+                return phantoms.Count;
+            }
+            catch { return 0; }
         }
 
         private static string StripGitQuotes(string s) =>
