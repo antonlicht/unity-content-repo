@@ -32,9 +32,11 @@ Or add via **Window > Package Manager** using a git URL.
 2. Commit `ProjectSettings/ContentRepo.asset`, `ContentRepoBuild.asset`, `ContentRepoGeneration.asset`,
    and `ContentRepoUpload.asset` so the whole team shares the settings.
 3. Open **Window > Content Browser** (or click the cloud icon in the main editor toolbar), then click
-   **Initialize** to clone the content repository. Git LFS must be installed: the content repository keeps
-   images, audio, video, models and fonts in LFS, so a partial checkout downloads only the binaries of the
-   packages it checks out. The tool sets up the LFS hooks in the clone.
+   **Initialize** to clone the content repository. The clone is a partial clone (`--filter=blob:none`): git
+   downloads a file's content only when it is checked out, so together with the sparse checkout you only
+   download the packages you check out (images, audio and their history included). Existing full clones are
+   switched to a partial clone automatically; they keep what they already downloaded. Viewing the history of a
+   package you have not checked out downloads those files on demand, which needs a network connection.
 4. Follow **[Documentation/Setup-AWS.md](Documentation/Setup-AWS.md)** to set up the CDN infrastructure.
 
 ---

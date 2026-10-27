@@ -124,13 +124,12 @@ namespace ContentRepo.Editor
                 if (Directory.Exists(subPath))
                     await Task.Run(() => Directory.Delete(subPath, true));
 
+                // Partial clone: file contents are downloaded only for what is checked out (see EnsurePartialCloneAsync).
                 await RunGitCommandAsync(
-                    $"clone --no-checkout -b {Quote(settings.Branch)} -- {Quote(settings.RemoteUrl)} {Quote(subPath)}",
+                    $"clone --no-checkout --filter=blob:none -b {Quote(settings.Branch)} -- {Quote(settings.RemoteUrl)} {Quote(subPath)}",
                     ProjectRoot);
                 freshClone = true;
             }
-
-            await EnsureLfsAsync();
 
             await RunGitCommandAsync("sparse-checkout init --cone", subPath);
             // Always check out _groups so Addressable group GUIDs are available
@@ -1197,6 +1196,41 @@ namespace ContentRepo.Editor
             await RepairIndexAsync();
         }
 
+        private static bool partialCloneChecked;
+
+        /// <summary>
+        /// Makes the content clone a partial clone (<c>--filter=blob:none</c>): git then downloads a file's content
+        /// only when it is checked out, so together with the sparse checkout a clone downloads only the packages it
+        /// checks out, not every package's images and audio. New clones are made this way; an existing full clone is
+        /// switched once (it keeps what it already has) so its later fetches skip file contents too.
+        /// </summary>
+        public static async Task EnsurePartialCloneAsync()
+        {
+            if (partialCloneChecked) return;
+            var root = ContentAbsolutePath;
+            try
+            {
+                var promisor = await RunGitCommandAsync("config --get remote.origin.promisor", root);
+                if (promisor.Trim().Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    partialCloneChecked = true;
+                    return;
+                }
+            }
+            catch { }
+
+            try
+            {
+                await RunGitCommandAsync("fetch --filter=blob:none origin", root);
+                partialCloneChecked = true;
+                Debug.Log("[ContentRepo] Switched the content repo to a partial clone: from now on only the files of checked-out packages are downloaded.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ContentRepo] Could not switch the content repo to a partial clone yet (offline?): {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Repairs a clone whose index is missing files from HEAD (clones created by older tool versions
         /// with <c>clone --no-checkout</c> and no checkout). In that state git treats every missing file
@@ -1204,36 +1238,10 @@ namespace ContentRepo.Editor
         /// in-cone files that are missing from disk. Local edits and untracked files are kept.
         /// Returns true when a repair was performed.
         /// </summary>
-        private static bool lfsChecked;
-
-        /// <summary>
-        /// Makes sure Git LFS is set up in the content clone: its filters and its hooks. A <c>--no-checkout</c>
-        /// clone gets no hooks, and without the pre-push hook a push uploads commits but not the LFS objects they
-        /// reference, so teammates would get pointer files instead of images and audio.
-        /// </summary>
-        public static async Task EnsureLfsAsync()
-        {
-            if (lfsChecked) return;
-            lfsChecked = true;
-            var root = ContentAbsolutePath;
-            try
-            {
-                var hookPath = (await RunGitCommandAsync("rev-parse --git-path hooks/pre-push", root)).Trim();
-                var hook = Path.IsPathRooted(hookPath) ? hookPath : Path.Combine(root, hookPath);
-                if (File.Exists(hook) && File.ReadAllText(hook).Contains("git lfs")) return;
-                await RunGitCommandAsync("lfs install --local", root);
-                Debug.Log("[ContentRepo] Set up Git LFS in the content repo (filters and hooks).");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[ContentRepo] Could not set up Git LFS in the content repo: {ex.Message} Install Git LFS (https://git-lfs.com) so images and audio are downloaded and uploaded correctly.");
-            }
-        }
-
         public static async Task<bool> RepairIndexAsync()
         {
             if (initializing) return false;
-            await EnsureLfsAsync();
+            await EnsurePartialCloneAsync();
             var repaired = await RepairIndexCoreAsync();
             if (await RestoreHiddenSharedFilesAsync()) repaired = true;
             return repaired;
