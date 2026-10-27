@@ -93,7 +93,17 @@ namespace ContentRepo.Editor
             }
         }
 
+        private static bool initializing;
+
         public static async Task InitAsync()
+        {
+            initializing = true;
+            try { await InitCoreAsync(); }
+            finally { initializing = false; }
+            await RepairIndexAsync();
+        }
+
+        private static async Task InitCoreAsync()
         {
             var settings = ContentRepoSettings.instance;
             if (string.IsNullOrWhiteSpace(settings.RemoteUrl))
@@ -105,6 +115,7 @@ namespace ContentRepo.Editor
 
             var subPath = ContentAbsolutePath;
             var gitMarker = Path.Combine(subPath, ".git");
+            var freshClone = false;
 
             if (!File.Exists(gitMarker) && !Directory.Exists(gitMarker))
             {
@@ -116,12 +127,18 @@ namespace ContentRepo.Editor
                 await RunGitCommandAsync(
                     $"clone --no-checkout -b {Quote(settings.Branch)} -- {Quote(settings.RemoteUrl)} {Quote(subPath)}",
                     ProjectRoot);
+                freshClone = true;
             }
 
             await RunGitCommandAsync("sparse-checkout init --cone", subPath);
             // Always check out _groups so Addressable group GUIDs are available
             // even when no package content is checked out.
             await RunGitCommandAsync($"sparse-checkout set {Quote(GroupsFolderName)}", subPath);
+
+            // A --no-checkout clone has an empty index; without this checkout the next commit would
+            // record every file outside the committed paths as deleted.
+            if (freshClone)
+                await RunGitCommandAsync($"checkout {Quote(settings.Branch)}", subPath);
 
             // Write a .gitignore next to the cloned directory so the parent repo
             // never shows the content folder or its Unity .meta file as noise.
@@ -191,6 +208,56 @@ namespace ContentRepo.Editor
         /// the sparse-checkout list.  The <c>_groups</c> system folder and any hidden folders
         /// (starting with '.') are excluded.
         /// </summary>
+        /// <summary>
+        /// The package folders in the sparse cone, read synchronously from the repo's sparse-checkout
+        /// file (excluding <c>_groups</c>). This is the machine's checkout state; a folder merely existing
+        /// on disk is not, because Unity recreates an empty folder for every top-level package .meta,
+        /// which cone mode always checks out.
+        /// </summary>
+        public static HashSet<string> ReadConeFolders()
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var gitPath = Path.Combine(ContentAbsolutePath, ".git");
+                string gitDir = null;
+                if (Directory.Exists(gitPath)) gitDir = gitPath;
+                else if (File.Exists(gitPath))
+                {
+                    var line = File.ReadAllText(gitPath).Trim();
+                    if (line.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase))
+                        gitDir = Path.GetFullPath(Path.Combine(ContentAbsolutePath, line.Substring(7).Trim()));
+                }
+                if (gitDir == null) return result;
+
+                var file = Path.Combine(gitDir, "info", "sparse-checkout");
+                if (!File.Exists(file)) return result;
+
+                foreach (var raw in File.ReadAllLines(file))
+                {
+                    var line = raw.Trim();
+                    if (line.Length < 3 || !line.StartsWith("/") || !line.EndsWith("/")) continue;
+                    var name = line.Trim('/');
+                    if (name.Length == 0 || name.Contains("/") || name.Contains("*")) continue;
+                    if (name.Equals(GroupsFolderName, StringComparison.OrdinalIgnoreCase)) continue;
+                    result.Add(name);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ContentRepo] Could not read the sparse-checkout list: {ex.Message}");
+            }
+            return result;
+        }
+
+        /// <summary>True when the package folder exists and contains at least one file.</summary>
+        public static bool FolderHasFiles(string folder)
+        {
+            var path = Path.Combine(ContentAbsolutePath, folder);
+            try { return Directory.Exists(path) && Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Any(); }
+            catch { return false; }
+        }
+
         public static Task<List<string>> GetLocalFoldersOnDiskAsync()
         {
             return Task.Run(() =>
@@ -380,13 +447,15 @@ namespace ContentRepo.Editor
         private static async Task RestoreGroupAssetAsync(string folder)
         {
             var groupRelPath     = $"{GroupsFolderName}/{folder}.asset";
-            var groupMetaRelPath = $"{GroupsFolderName}/{folder}.asset.meta";
-            var schemaGlob       = $"{GroupsFolderName}/{folder}_*"; // schema assets that travel with the group
+            var committed = SplitPaths(await RunGitCommandAsync(
+                    $"-c core.quotepath=off ls-tree --name-only HEAD {Quote(GroupsFolderName + "/")}", ContentAbsolutePath))
+                .Where(p => IsGroupFileOf(folder, Path.GetFileName(p)))
+                .ToList();
 
             // A prior disconnect marks these files skip-worktree and removes them; clear that first so
             // `git checkout` can actually repopulate them below.
-            await ClearSkipWorktreeAsync($"{GroupsFolderName}/{folder}.*");
-            await ClearSkipWorktreeAsync(schemaGlob);
+            foreach (var relPath in committed)
+                await ClearSkipWorktreeAsync(relPath);
 
             // git checkout HEAD -- <path> restores the file to the last committed state. The group
             // asset warns if genuinely absent; the meta and schema files may legitimately not be
@@ -402,12 +471,8 @@ namespace ContentRepo.Editor
                 return;
             }
 
-            foreach (var relPath in new[] { groupMetaRelPath, schemaGlob })
-            {
-                try { await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath); }
-                catch (InvalidOperationException ex)
-                    when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec")) { /* not committed yet — fine */ }
-            }
+            foreach (var relPath in committed.Where(p => !p.Equals(groupRelPath, StringComparison.OrdinalIgnoreCase)))
+                await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath);
         }
 
         public static async Task DisconnectFolderAsync(string folder)
@@ -669,6 +734,7 @@ namespace ContentRepo.Editor
         public static async Task PullFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            await RepairIndexAsync();
             // Suspend Unity's importer while git rewrites the working tree: a pull can transiently
             // materialise an asset before its .meta, and an import in that window regenerates the GUID
             // (breaking every reference to it). Same guard as CheckOutFolderAsync.
@@ -696,6 +762,7 @@ namespace ContentRepo.Editor
             // Defensive: if any of the folder's files still carry the skip-worktree bit, `git add`
             // silently skips them and the commit would omit real changes (e.g. edited voice maps,
             // scripts, or art). Clear it first so the whole working state of the folder is staged.
+            await RepairIndexAsync();
             await ClearSkipWorktreeAsync(folder);
 
             // Stage package content normally.
@@ -710,11 +777,14 @@ namespace ContentRepo.Editor
                     $"add --sparse -- {string.Join(" ", groupFiles.Select(Quote))}",
                     ContentAbsolutePath);
 
-            var statusOut = await RunGitCommandAsync("diff --cached --name-only", ContentAbsolutePath);
+            // Limit the commit to this package's own paths so nothing else that happens to be staged
+            // (another package, or deletions from a damaged index) is committed under its name.
+            var commitPaths = string.Join(" ", new[] { folder }.Concat(groupFiles).Select(Quote));
+            var statusOut = await RunGitCommandAsync($"diff --cached --name-only -- {commitPaths}", ContentAbsolutePath);
             if (string.IsNullOrWhiteSpace(statusOut))
                 throw new InvalidOperationException($"No staged changes in '{folder}' or its Addressable group files.");
 
-            await RunGitCommandAsync($"commit -m {Quote(commitMessage)}", ContentAbsolutePath);
+            await RunGitCommandAsync($"commit -m {Quote(commitMessage)} -- {commitPaths}", ContentAbsolutePath);
             await TryRemoteAsync("push", () => RunGitCommandAsync(
                 $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}",
                 ContentAbsolutePath));
@@ -897,6 +967,7 @@ namespace ContentRepo.Editor
 
         public static async Task PullAllAsync()
         {
+            await RepairIndexAsync();
             // Suspend Unity's importer while git rewrites the working tree (see PullFolderAsync) so a
             // pull that touches assets can't regenerate their GUIDs mid-import.
             AssetDatabase.StartAssetEditing();
@@ -1008,7 +1079,67 @@ namespace ContentRepo.Editor
             {
                 await RunGitCommandAsync("sparse-checkout init --cone", ContentAbsolutePath);
             }
+            await RepairIndexAsync();
         }
+
+        /// <summary>
+        /// Repairs a clone whose index is missing files from HEAD (clones created by older tool versions
+        /// with <c>clone --no-checkout</c> and no checkout). In that state git treats every missing file
+        /// as a staged deletion. Rebuilds the index from HEAD, re-applies the sparse cone and restores
+        /// in-cone files that are missing from disk. Local edits and untracked files are kept.
+        /// Returns true when a repair was performed.
+        /// </summary>
+        public static async Task<bool> RepairIndexAsync()
+        {
+            if (initializing) return false;
+            var root = ContentAbsolutePath;
+            try
+            {
+                var sparse = await RunGitCommandAsync("config --get core.sparseCheckout", root);
+                if (!sparse.Trim().Equals("true", StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            catch { return false; }
+            List<string> headPaths;
+            try { headPaths = SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-tree -r --name-only HEAD", root)); }
+            catch { return false; }
+            if (headPaths.Count == 0) return false;
+
+            var indexPaths = new HashSet<string>(
+                SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files", root)), StringComparer.Ordinal);
+            var cone = (await GetCheckedOutFoldersAsync()).Append(GroupsFolderName).ToList();
+            bool InCone(string p) => p.IndexOf('/') < 0 || cone.Any(f => p.StartsWith(f + "/", StringComparison.OrdinalIgnoreCase));
+
+            var missing = headPaths.Where(p => !indexPaths.Contains(p)).ToList();
+            var broken = indexPaths.Count == 0
+                || missing.Any(p => !InCone(p) || File.Exists(Path.Combine(root, p.Replace('/', Path.DirectorySeparatorChar))));
+            if (!broken) return false;
+
+            Debug.LogWarning($"[ContentRepo] The content repo's git index is missing {missing.Count} file(s) from HEAD. Rebuilding it from HEAD; local edits are kept.");
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                await RunGitCommandAsync("read-tree HEAD", root);
+                await RunGitCommandAsync("sparse-checkout reapply", root);
+                var deleted = SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files --deleted", root));
+                for (var i = 0; i < deleted.Count; i += 100)
+                    await RunGitCommandAsync(
+                        $"checkout -- {string.Join(" ", deleted.Skip(i).Take(100).Select(Quote))}", root);
+                Debug.Log($"[ContentRepo] Repaired the content repo index and restored {deleted.Count} missing file(s).");
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
+            return true;
+        }
+
+        private static List<string> SplitPaths(string output) =>
+            output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+                  .Select(s => s.Trim())
+                  .Where(s => s.Length > 0)
+                  .ToList();
 
         // Clears git's skip-worktree bit on all indexed files under `folderOrPath`. Used both to let
         // `git rm` process sparse-excluded files and, on checkout, to make a folder's files trackable
@@ -1041,23 +1172,37 @@ namespace ContentRepo.Editor
         }
 
         // Returns repo-relative paths for all group + schema files that belong to `folder` and exist on disk.
-        // Matches "<folder>.asset", "<folder>.asset.meta", and any "<folder>_schema_*" variants.
         private static IEnumerable<string> GetGroupRelativePaths(string folder)
         {
             var groupsDir = Path.Combine(ContentAbsolutePath, GroupsFolderName);
             if (!Directory.Exists(groupsDir)) yield break;
 
-            var exactPrefix  = folder + ".";          // <folder>.asset  / <folder>.asset.meta
-            var schemaPrefix = folder + "_";          // <folder>_BundledAssetGroupSchema.asset + .meta (schemas travel in _groups/)
-
             foreach (var absPath in Directory.GetFiles(groupsDir))
             {
                 var name = Path.GetFileName(absPath);
-                if (name.StartsWith(exactPrefix,  StringComparison.OrdinalIgnoreCase) ||
-                    name.StartsWith(schemaPrefix, StringComparison.OrdinalIgnoreCase))
+                if (IsGroupFileOf(folder, name))
                     yield return $"{GroupsFolderName}/{name}";
             }
         }
+
+        private static readonly System.Text.RegularExpressions.Regex GroupFilePattern =
+            new System.Text.RegularExpressions.Regex(
+                @"^(?<pkg>.+?)(?<schema>_[A-Za-z]+Schema)?\.asset(\.meta)?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// The package a file in <c>_groups/</c> belongs to: <c>&lt;pkg&gt;.asset</c> or
+        /// <c>&lt;pkg&gt;_&lt;Type&gt;Schema.asset</c>, plus their <c>.meta</c> files. Exact names only, so a
+        /// package whose name starts with another package's name never claims its files.
+        /// </summary>
+        public static string PackageOfGroupFile(string fileName)
+        {
+            var match = GroupFilePattern.Match(fileName ?? string.Empty);
+            return match.Success ? match.Groups["pkg"].Value : null;
+        }
+
+        public static bool IsGroupFileOf(string folder, string fileName) =>
+            string.Equals(PackageOfGroupFile(fileName), folder, StringComparison.OrdinalIgnoreCase);
 
         private static string Quote(string s)
         {
