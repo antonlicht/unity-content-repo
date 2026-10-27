@@ -436,6 +436,7 @@ namespace ContentRepo.Editor
             }
             finally
             {
+                ContentGroupRegistry.UnregisterMissing();
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
@@ -443,11 +444,18 @@ namespace ContentRepo.Editor
             }
         }
 
-        private static async Task RestoreGroupAssetAsync(string folder)
+        private static Task RestoreGroupAssetAsync(string folder) => ResetGroupFilesToHeadAsync(folder, deleteUntracked: false);
+
+        /// <summary>
+        /// Puts a package's group and schema files back to their committed state. Local modifications (and,
+        /// with <paramref name="deleteUntracked"/>, group files that were never committed) are copied to
+        /// Library/ContentRepo/Backups first. Returns the number of files that differed.
+        /// </summary>
+        private static async Task<int> ResetGroupFilesToHeadAsync(string folder, bool deleteUntracked)
         {
-            var groupRelPath     = $"{GroupsFolderName}/{folder}.asset";
+            var root = ContentAbsolutePath;
             var committed = SplitPaths(await RunGitCommandAsync(
-                    $"-c core.quotepath=off ls-tree --name-only HEAD {Quote(GroupsFolderName + "/")}", ContentAbsolutePath))
+                    $"-c core.quotepath=off ls-tree --name-only HEAD {Quote(GroupsFolderName + "/")}", root))
                 .Where(p => IsGroupFileOf(folder, Path.GetFileName(p)))
                 .ToList();
 
@@ -456,53 +464,48 @@ namespace ContentRepo.Editor
             foreach (var relPath in committed)
                 await ClearSkipWorktreeAsync(relPath);
 
-            // Older tool versions also let Addressables prune groups of packages that were not checked out.
-            // Restoring from HEAD discards that, so keep a copy of any local modification first.
-            if (committed.Count > 0)
-            {
-                var modified = SplitPaths(await RunGitCommandAsync(
-                        $"-c core.quotepath=off diff --name-only HEAD -- {string.Join(" ", committed.Select(Quote))}", ContentAbsolutePath))
-                    .Where(p => File.Exists(Path.Combine(ContentAbsolutePath, p)))
-                    .ToList();
-                if (modified.Count > 0)
-                {
-                    var backupDir = Path.Combine(ProjectRoot, "Library", "ContentRepo", "Backups", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
-                    Directory.CreateDirectory(backupDir);
-                    foreach (var rel in modified)
-                        File.Copy(Path.Combine(ContentAbsolutePath, rel), Path.Combine(backupDir, Path.GetFileName(rel)), true);
-                    Debug.LogWarning($"[ContentRepo] Restored {modified.Count} locally modified group file(s) of '{folder}' from HEAD. Copies are in {backupDir}.");
-                }
-            }
+            var modified = committed.Count == 0
+                ? new List<string>()
+                : SplitPaths(await RunGitCommandAsync(
+                    $"-c core.quotepath=off diff --name-only HEAD -- {string.Join(" ", committed.Select(Quote))}", root));
+            var untracked = deleteUntracked
+                ? GetGroupRelativePaths(folder).Where(p => !committed.Contains(p, StringComparer.OrdinalIgnoreCase)).ToList()
+                : new List<string>();
 
-            // git checkout HEAD -- <path> restores the file to the last committed state. The group
-            // asset warns if genuinely absent; the meta and schema files may legitimately not be
-            // committed yet (schemas move into _groups/ only on the first build/play), so ignore those.
-            try
-            {
-                await RunGitCommandAsync($"checkout HEAD -- {Quote(groupRelPath)}", ContentAbsolutePath);
-            }
-            catch (InvalidOperationException ex)
-                when (ex.Message.Contains("did not match") || ex.Message.Contains("pathspec"))
-            {
-                Debug.LogWarning($"[ContentRepo] No committed group asset found for '{folder}' in {GroupsFolderName}/; skipping group restore.");
-                return;
-            }
+            var changed = modified.Concat(untracked).Where(p => File.Exists(Path.Combine(root, p))).ToList();
+            if (changed.Count > 0)
+                Debug.LogWarning($"[ContentRepo] Reset {changed.Count} group file(s) of '{folder}' to the committed state. Copies are in {BackupFiles(changed)}.");
 
-            foreach (var relPath in committed.Where(p => !p.Equals(groupRelPath, StringComparison.OrdinalIgnoreCase)))
-                await RunGitCommandAsync($"checkout HEAD -- {Quote(relPath)}", ContentAbsolutePath);
+            for (var i = 0; i < committed.Count; i += 100)
+                await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", committed.Skip(i).Take(100).Select(Quote))}", root);
+            foreach (var rel in untracked)
+                File.Delete(Path.Combine(root, rel));
+            return changed.Count;
+        }
+
+        private static string BackupFiles(IEnumerable<string> repoRelativePaths)
+        {
+            var backupDir = Path.Combine(ProjectRoot, "Library", "ContentRepo", "Backups", DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+            Directory.CreateDirectory(backupDir);
+            foreach (var rel in repoRelativePaths)
+            {
+                var source = Path.Combine(ContentAbsolutePath, rel);
+                if (File.Exists(source)) File.Copy(source, Path.Combine(backupDir, Path.GetFileName(rel)), true);
+            }
+            return backupDir;
         }
 
         /// <summary>
-        /// Removes a package from this machine's checkout. Only local state changes: the package's group is
-        /// unregistered in memory before its files disappear (so Addressables never prunes it), its group and
-        /// schema files stay in <c>_groups/</c> exactly as committed, and the committed Addressables settings
-        /// are not touched. The tracked top-level <c>&lt;pkg&gt;.meta</c> stays too; an empty folder is kept next
-        /// to it because Unity would otherwise recreate one with a warning.
+        /// Removes a package from this machine's checkout. Only local state changes: its folder is deleted,
+        /// its group and schema files go back to their committed state (uncommitted changes are dropped like
+        /// the folder's, with copies in Library/ContentRepo/Backups), and the committed Addressables settings
+        /// are not touched. The group is unregistered in memory right before Unity sees the deletions, so
+        /// Addressables never prunes it. The tracked top-level <c>&lt;pkg&gt;.meta</c> stays; an empty folder is
+        /// kept next to it because Unity would otherwise recreate one with a warning.
         /// </summary>
         public static async Task DisconnectFolderAsync(string folder)
         {
             ValidateFolderName(folder);
-            ContentGroupRegistry.Unregister(folder);
 
             var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var remaining = current
@@ -522,9 +525,12 @@ namespace ContentRepo.Editor
                     catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Failed to delete local folder '{localFolder}': {ex.Message}"); }
                 }
                 if (File.Exists(localFolder + ".meta")) Directory.CreateDirectory(localFolder);
+
+                await ResetGroupFilesToHeadAsync(folder, deleteUntracked: true);
             }
             finally
             {
+                ContentGroupRegistry.Unregister(folder);
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
@@ -586,6 +592,11 @@ namespace ContentRepo.Editor
             AssetDatabase.Refresh();
         }
 
+        /// <summary>
+        /// Renames a package together with its top-level .meta and its group and schema files, so the group
+        /// keeps its m_GUID (bundle identity). Requires the package to have no uncommitted changes and nothing
+        /// else to be staged; any failure moves everything back and restores the sparse cone.
+        /// </summary>
         public static async Task RenameFolderAsync(string oldFolder, string newFolder)
         {
             ValidateFolderName(oldFolder);
@@ -595,86 +606,145 @@ namespace ContentRepo.Editor
             if (string.Equals(oldFolder, newFolder, StringComparison.Ordinal))
                 return;
 
-            var wasCheckedOut = await IsFolderCheckedOutAsync(oldFolder);
-            ContentGroupRegistry.Unregister(oldFolder);
+            var root = ContentAbsolutePath;
+            var caseOnly = string.Equals(oldFolder, newFolder, StringComparison.OrdinalIgnoreCase);
+            if (!caseOnly)
+            {
+                var taken = !string.IsNullOrWhiteSpace(await RunGitCommandAsync($"ls-tree -d HEAD -- {Quote(newFolder)}", root))
+                            || (await GetRemoteFoldersAsync()).Any(f => f.Equals(newFolder, StringComparison.OrdinalIgnoreCase))
+                            || FolderHasFiles(newFolder)
+                            || File.Exists(Path.Combine(root, GroupsFolderName, newFolder + ".asset"));
+                if (taken) throw new InvalidOperationException($"A package named '{newFolder}' already exists.");
+            }
+
+            var originalCone = await GetCheckedOutFoldersAsync();
+            var wasCheckedOut = originalCone.Any(f => f.Equals(oldFolder, StringComparison.OrdinalIgnoreCase));
+
+            async Task RestoreConeAsync() =>
+                await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", originalCone.Prepend(GroupsFolderName).Select(Quote))}", root);
 
             if (!wasCheckedOut)
             {
                 await EnsureSparseCheckoutAsync();
-                await RunGitCommandAsync($"sparse-checkout add {Quote(oldFolder)}", ContentAbsolutePath);
-                await RunGitCommandAsync(
-                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                    ContentAbsolutePath);
+                await RunGitCommandAsync($"sparse-checkout add {Quote(oldFolder)}", root);
+                await RunGitCommandAsync($"pull origin {Quote(ContentRepoSettings.instance.Branch)}", root);
             }
 
-            // git refuses to move files to paths outside the sparse cone, so the new name joins it first.
-            await RunGitCommandAsync($"sparse-checkout add {Quote(newFolder)}", ContentAbsolutePath);
-
-            var renames = new List<(string from, string to)> { (oldFolder, newFolder) };
-            if (File.Exists(Path.Combine(ContentAbsolutePath, oldFolder + ".meta")))
-                renames.Add((oldFolder + ".meta", newFolder + ".meta"));
-            foreach (var groupFile in GetGroupRelativePaths(oldFolder))
+            var groupFiles = GetGroupRelativePaths(oldFolder).ToList();
+            var dirty = await RunGitCommandAsync(
+                $"-c core.quotepath=off status --porcelain -- {string.Join(" ", new[] { oldFolder }.Concat(groupFiles).Select(Quote))}", root);
+            if (!string.IsNullOrWhiteSpace(dirty))
             {
-                var name = Path.GetFileName(groupFile);
-                renames.Add((groupFile, $"{GroupsFolderName}/{newFolder}{name.Substring(oldFolder.Length)}"));
+                if (!wasCheckedOut) await RestoreConeAsync();
+                throw new InvalidOperationException($"'{oldFolder}' has uncommitted changes. Commit or discard them before renaming the package.");
             }
 
-            // Case-only rename on case-insensitive filesystems (Windows/macOS default) requires a
-            // two-step mv through a temporary name, otherwise git refuses or silently no-ops.
-            var caseOnly = string.Equals(oldFolder, newFolder, StringComparison.OrdinalIgnoreCase);
-            foreach (var (from, to) in renames)
+            var meta = oldFolder + ".meta";
+            var moves = new List<(string from, string to, bool tracked)> { (oldFolder, newFolder, true) };
+            if (File.Exists(Path.Combine(root, meta)))
+                moves.Add((meta, newFolder + ".meta", !string.IsNullOrWhiteSpace(await RunGitCommandAsync($"ls-files -- {Quote(meta)}", root))));
+            foreach (var groupFile in groupFiles)
+                moves.Add((groupFile, $"{GroupsFolderName}/{newFolder}{Path.GetFileName(groupFile).Substring(oldFolder.Length)}", true));
+
+            ContentGroupRegistry.Unregister(oldFolder);
+            var done = new List<(string from, string to, bool tracked)>();
+            try
             {
-                if (caseOnly)
+                await RunGitCommandAsync($"sparse-checkout add {Quote(newFolder)}", root);
+                foreach (var move in moves)
                 {
-                    var tempName = $"{from}__cs_rename_{Guid.NewGuid():N}";
-                    await RunGitCommandAsync($"mv -f -- {Quote(from)} {Quote(tempName)}", ContentAbsolutePath);
-                    await RunGitCommandAsync($"mv -f -- {Quote(tempName)} {Quote(to)}", ContentAbsolutePath);
+                    await MovePathAsync(move.from, move.to, move.tracked, caseOnly);
+                    done.Add(move);
                 }
-                else
+
+                // The group keeps its m_GUID (and so its bundle identity); only its names follow the package.
+                foreach (var (_, to, _) in moves.Where(m => m.to.StartsWith(GroupsFolderName + "/") && m.to.EndsWith(".asset")))
                 {
-                    await RunGitCommandAsync($"mv -- {Quote(from)} {Quote(to)}", ContentAbsolutePath);
+                    var abs = Path.Combine(root, to);
+                    var text = File.ReadAllText(abs)
+                        .Replace($"m_Name: {oldFolder}\n", $"m_Name: {newFolder}\n")
+                        .Replace($"m_Name: {oldFolder}\r\n", $"m_Name: {newFolder}\r\n")
+                        .Replace($"m_GroupName: {oldFolder}\n", $"m_GroupName: {newFolder}\n")
+                        .Replace($"m_GroupName: {oldFolder}\r\n", $"m_GroupName: {newFolder}\r\n")
+                        .Replace($"m_Name: {oldFolder}_", $"m_Name: {newFolder}_");
+                    File.WriteAllText(abs, text);
+                    await RunGitCommandAsync($"add --sparse -- {Quote(to)}", root);
                 }
-            }
 
-            // The group keeps its m_GUID (and so its bundle identity); only its names follow the package.
-            foreach (var (_, to) in renames.Where(r => r.to.StartsWith(GroupsFolderName + "/") && r.to.EndsWith(".asset")))
+                var renamePaths = moves.Where(m => m.tracked).SelectMany(m => new[] { m.from, m.to }).ToList();
+                var foreign = SplitPaths(await RunGitCommandAsync("-c core.quotepath=off diff --cached --name-only", root))
+                    .Where(p => !renamePaths.Any(r => p.Equals(r, StringComparison.OrdinalIgnoreCase) ||
+                                                      p.StartsWith(r + "/", StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+                if (foreign.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Other changes are staged in the content repo ({string.Join(", ", foreign.Take(5))}). Unstage them before renaming a package.");
+
+                await RunGitCommandAsync($"commit -m {Quote($"Rename {oldFolder} to {newFolder}")}", root);
+            }
+            catch
             {
-                var abs = Path.Combine(ContentAbsolutePath, to);
-                var text = File.ReadAllText(abs)
-                    .Replace($"m_Name: {oldFolder}\n", $"m_Name: {newFolder}\n")
-                    .Replace($"m_Name: {oldFolder}\r\n", $"m_Name: {newFolder}\r\n")
-                    .Replace($"m_GroupName: {oldFolder}\n", $"m_GroupName: {newFolder}\n")
-                    .Replace($"m_GroupName: {oldFolder}\r\n", $"m_GroupName: {newFolder}\r\n")
-                    .Replace($"m_Name: {oldFolder}_", $"m_Name: {newFolder}_");
-                File.WriteAllText(abs, text);
-                await RunGitCommandAsync($"add -- {Quote(to)}", ContentAbsolutePath);
+                for (var i = done.Count - 1; i >= 0; i--)
+                {
+                    try { await MovePathAsync(done[i].to, done[i].from, done[i].tracked, caseOnly); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not move '{done[i].to}' back to '{done[i].from}': {ex.Message}"); }
+                }
+                var trackedFrom = done.Where(m => m.tracked).Select(m => m.from).ToList();
+                if (trackedFrom.Count > 0)
+                {
+                    try { await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", trackedFrom.Select(Quote))}", root); }
+                    catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not restore '{oldFolder}' after a failed rename: {ex.Message}"); }
+                }
+                try { await RestoreConeAsync(); }
+                catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not restore the sparse checkout after a failed rename: {ex.Message}"); }
+                NotifyChange();
+                AssetDatabase.Refresh();
+                ContentGroupRegistry.Reconcile();
+                throw;
             }
 
-            var paths = renames.SelectMany(r => new[] { r.from, r.to }).Select(Quote);
-            await RunGitCommandAsync(
-                $"commit -m {Quote($"Rename {oldFolder} to {newFolder}")} -- {string.Join(" ", paths)}",
-                ContentAbsolutePath);
             await TryRemoteAsync("push", () => RunGitCommandAsync(
-                $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}",
-                ContentAbsolutePath));
+                $"push origin HEAD:{Quote(ContentRepoSettings.instance.Branch)}", root));
 
-            // Replace old name in sparse-checkout; if the folder wasn't checked out
-            // before, restore to the state it was in (exclude the renamed folder).
-            var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
-            var updated = current
-                .Select(f => string.Equals(f, oldFolder, StringComparison.OrdinalIgnoreCase) ? newFolder : f)
+            var updated = originalCone
+                .Select(f => f.Equals(oldFolder, StringComparison.OrdinalIgnoreCase) ? newFolder : f)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-
             if (!wasCheckedOut)
                 updated.RemoveAll(f => f.Equals(newFolder, StringComparison.OrdinalIgnoreCase));
-
             updated.Insert(0, GroupsFolderName); // always keep _groups checked out
-            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", updated.Select(Quote))}", ContentAbsolutePath);
+            await RunGitCommandAsync($"sparse-checkout set {string.Join(" ", updated.Select(Quote))}", root);
 
             NotifyChange();
             AssetDatabase.Refresh();
             ContentGroupRegistry.Reconcile();
+        }
+
+        /// <summary>Moves a path with git when it is tracked, on disk otherwise; case-only renames go through a temporary name.</summary>
+        private static async Task MovePathAsync(string from, string to, bool tracked, bool caseOnly)
+        {
+            var root = ContentAbsolutePath;
+            if (tracked)
+            {
+                if (caseOnly)
+                {
+                    var temp = $"{from}~{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+                    await RunGitCommandAsync($"mv -f --sparse -- {Quote(from)} {Quote(temp)}", root);
+                    await RunGitCommandAsync($"mv -f --sparse -- {Quote(temp)} {Quote(to)}", root);
+                }
+                else await RunGitCommandAsync($"mv --sparse -- {Quote(from)} {Quote(to)}", root);
+                return;
+            }
+
+            var fromAbs = Path.Combine(root, from);
+            var toAbs = Path.Combine(root, to);
+            if (caseOnly)
+            {
+                var tempAbs = $"{fromAbs}~{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+                File.Move(fromAbs, tempAbs);
+                File.Move(tempAbs, toAbs);
+            }
+            else File.Move(fromAbs, toAbs);
         }
 
         /// <summary>
@@ -741,6 +811,7 @@ namespace ContentRepo.Editor
             }
             finally
             {
+                ContentGroupRegistry.UnregisterMissing();
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
@@ -980,6 +1051,7 @@ namespace ContentRepo.Editor
             }
             finally
             {
+                ContentGroupRegistry.UnregisterMissing();
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
@@ -1098,25 +1170,46 @@ namespace ContentRepo.Editor
             return repaired;
         }
 
+        private const string LegacyMetasMigratedKey = "contentrepo.legacyDisconnectMigrated";
+
         /// <summary>
-        /// Older tool versions hid the group files of disconnected packages (skip-worktree + delete) and
-        /// deleted their tracked top-level <c>&lt;pkg&gt;.meta</c>. Group files of every package now stay on disk
-        /// exactly as committed, and the metas must stay so folder GUIDs never change. Restores both.
+        /// Repairs what older tool versions left in <c>_groups/</c> and at the top level:
+        /// group files of disconnected packages hidden with skip-worktree are restored; group files of packages
+        /// that are not checked out but were modified locally (Addressables purges and the old window pruning)
+        /// are reset to HEAD with a backup, because nothing may change them on this machine; and, once per
+        /// clone, the tracked top-level .meta of a package that is not checked out is restored if an old
+        /// Disconnect deleted it.
         /// </summary>
         private static async Task<bool> RestoreHiddenSharedFilesAsync()
         {
             var root = ContentAbsolutePath;
-            List<string> hidden, deletedMetas;
+            var cone = ReadConeFolders();
+            bool Dormant(string package) => package != null && !cone.Contains(package) && !FolderHasFiles(package);
+
+            List<string> hidden, damaged, deletedMetas;
+            bool metasMigrated;
             try
             {
                 hidden = SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off ls-files -v -- {Quote(GroupsFolderName + "/")}", root))
                     .Where(l => l.StartsWith("S ")).Select(l => l.Substring(2)).ToList();
-                deletedMetas = SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files --deleted", root))
-                    .Where(p => p.IndexOf('/') < 0 && p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                damaged = SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off diff --name-only HEAD -- {Quote(GroupsFolderName + "/")}", root))
+                    .Where(p => !hidden.Contains(p) && Dormant(PackageOfGroupFile(Path.GetFileName(p))))
                     .ToList();
+                metasMigrated = await IsGitFlagSetAsync(LegacyMetasMigratedKey);
+                deletedMetas = metasMigrated
+                    ? new List<string>()
+                    : SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files --deleted", root))
+                        .Where(p => p.IndexOf('/') < 0 && p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
+                                    && Dormant(p.Substring(0, p.Length - ".meta".Length)))
+                        .ToList();
             }
             catch { return false; }
-            if (hidden.Count == 0 && deletedMetas.Count == 0) return false;
+
+            if (hidden.Count == 0 && damaged.Count == 0 && deletedMetas.Count == 0)
+            {
+                if (!metasMigrated) await SetGitFlagAsync(LegacyMetasMigratedKey);
+                return false;
+            }
 
             AssetDatabase.StartAssetEditing();
             try
@@ -1127,9 +1220,18 @@ namespace ContentRepo.Editor
                     await RunGitCommandAsync($"update-index --no-skip-worktree -- {batch}", root);
                     await RunGitCommandAsync($"checkout -- {batch}", root);
                 }
+                if (damaged.Count > 0)
+                {
+                    var backupDir = BackupFiles(damaged);
+                    for (var i = 0; i < damaged.Count; i += 100)
+                        await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", damaged.Skip(i).Take(100).Select(Quote))}", root);
+                    Debug.LogWarning($"[ContentRepo] Reset {damaged.Count} group file(s) of packages that are not checked out to the committed state. Copies are in {backupDir}.");
+                }
                 for (var i = 0; i < deletedMetas.Count; i += 100)
                     await RunGitCommandAsync($"checkout -- {string.Join(" ", deletedMetas.Skip(i).Take(100).Select(Quote))}", root);
-                Debug.Log($"[ContentRepo] Restored {hidden.Count} hidden group file(s) and {deletedMetas.Count} package .meta file(s) removed by an older Disconnect.");
+                if (hidden.Count + deletedMetas.Count > 0)
+                    Debug.Log($"[ContentRepo] Restored {hidden.Count} hidden group file(s) and {deletedMetas.Count} package .meta file(s) removed by an older Disconnect.");
+                if (!metasMigrated) await SetGitFlagAsync(LegacyMetasMigratedKey);
             }
             finally
             {
@@ -1138,6 +1240,15 @@ namespace ContentRepo.Editor
             }
             return true;
         }
+
+        private static async Task<bool> IsGitFlagSetAsync(string key)
+        {
+            try { return (await RunGitCommandAsync($"config --local --get {key}", ContentAbsolutePath)).Trim() == "true"; }
+            catch { return false; }
+        }
+
+        private static Task SetGitFlagAsync(string key) =>
+            RunGitCommandAsync($"config --local {key} true", ContentAbsolutePath);
 
         private static async Task<bool> RepairIndexCoreAsync()
         {

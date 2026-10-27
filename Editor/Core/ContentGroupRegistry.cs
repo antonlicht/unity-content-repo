@@ -22,11 +22,13 @@ namespace ContentRepo.Editor
     public static class ContentGroupRegistry
     {
         private const double BuildPollSeconds = 0.5;
+        private const int MaxSettingsRetries = 50;
 
         private static readonly HashSet<string> Reported = new(StringComparer.Ordinal);
         private static bool flushScheduled;
         private static bool reconcileScheduled;
         private static int buildScopes;
+        private static int settingsRetries;
 
         internal static bool Flushing { get; private set; }
         internal static bool Quitting { get; private set; }
@@ -93,8 +95,14 @@ namespace ContentRepo.Editor
         /// </summary>
         public static void Reconcile()
         {
+            if (string.IsNullOrEmpty(ContentRoot)) return;
             var settings = AddressableAssetSettingsDefaultObject.Settings;
-            if (settings == null || string.IsNullOrEmpty(ContentRoot)) return;
+            if (settings == null)
+            {
+                if (settingsRetries++ < MaxSettingsRetries) ScheduleReconcile();
+                return;
+            }
+            settingsRetries = 0;
 
             var active = new HashSet<string>(ActivePackages(), StringComparer.OrdinalIgnoreCase);
             foreach (var group in settings.groups.ToList())
@@ -115,8 +123,48 @@ namespace ContentRepo.Editor
                     ReportOnce($"twin:{package}", () => Debug.LogError(TwinMessage(package, twin)));
                     continue;
                 }
+                if (IsDirtyInMemory(canonical)) canonical = ReloadFromDisk(canonical);
                 Register(settings, canonical);
             }
+        }
+
+        /// <summary>
+        /// Unregisters content groups whose package folder or group file is gone from disk. Called right after
+        /// git rewrote the worktree and before Unity imports the deletions, so Addressables never strips the
+        /// entries of a group that is about to become dormant.
+        /// </summary>
+        public static void UnregisterMissing()
+        {
+            var settings = AddressableAssetSettingsDefaultObject.Settings;
+            if (settings == null) return;
+            var projectRoot = Directory.GetParent(Application.dataPath)!.FullName;
+            var cone = ContentGitApi.ReadConeFolders();
+            foreach (var group in settings.groups.ToList())
+            {
+                if (!IsContentGroup(group)) continue;
+                var package = PackageOfCanonicalGroup(group);
+                var present = package != null && cone.Contains(package) && ContentGitApi.FolderHasFiles(package) &&
+                              File.Exists(Path.Combine(projectRoot, CanonicalGroupPath(package)));
+                if (!present) Unregister(settings, group);
+            }
+        }
+
+        /// <summary>
+        /// A group that is not registered can still carry unsaved in-memory changes, e.g. entries Addressables
+        /// stripped while its assets were deleted. Its saves are refused while its package is not checked out,
+        /// so before it is registered again the in-memory object is reloaded from the committed file.
+        /// </summary>
+        private static bool IsDirtyInMemory(AddressableAssetGroup group) =>
+            EditorUtility.IsDirty(group) || group.Schemas.Any(s => s != null && EditorUtility.IsDirty(s));
+
+        private static AddressableAssetGroup ReloadFromDisk(AddressableAssetGroup group)
+        {
+            var path = AssetDatabase.GetAssetPath(group);
+            foreach (var schema in group.Schemas.Where(s => s != null && EditorUtility.IsDirty(s)).ToList())
+                Resources.UnloadAsset(schema);
+            Resources.UnloadAsset(group);
+            Debug.LogWarning($"[ContentRepo] Discarded unsaved changes to '{path}' made while its package was not checked out.");
+            return AssetDatabase.LoadAssetAtPath<AddressableAssetGroup>(path);
         }
 
         /// <summary>
@@ -261,11 +309,13 @@ namespace ContentRepo.Editor
             var nextCheck = 0d;
             void Tick()
             {
-                if (IsBuilding || EditorApplication.timeSinceStartup < nextCheck)
+                var now = EditorApplication.timeSinceStartup;
+                if (IsBuilding)
                 {
-                    nextCheck = EditorApplication.timeSinceStartup + BuildPollSeconds;
+                    nextCheck = now + BuildPollSeconds;
                     return;
                 }
+                if (now < nextCheck) return;
                 EditorApplication.update -= Tick;
                 flushScheduled = false;
                 SaveSettings();
