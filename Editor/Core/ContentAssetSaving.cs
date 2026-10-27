@@ -25,7 +25,7 @@ namespace ContentRepo.Editor
 
         public static void SaveSettings(AddressableAssetSettings settings)
         {
-            if (settings != null) AssetDatabase.SaveAssetIfDirty(settings);
+            if (settings != null) ContentGroupRegistry.SaveSettings(settings);
         }
 
         /// <summary>Snapshot of the settings without the hash, to detect changes that were fully restored.</summary>
@@ -40,7 +40,7 @@ namespace ContentRepo.Editor
         {
             if (settings == null) return;
             if (!wasDirty && Fingerprint(settings) == fingerprint) EditorUtility.ClearDirty(settings);
-            else AssetDatabase.SaveAssetIfDirty(settings);
+            else ContentGroupRegistry.SaveSettings(settings);
         }
 
         /// <summary>

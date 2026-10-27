@@ -1,21 +1,23 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.AddressableAssets;
 using UnityEditor.AddressableAssets.Build.DataBuilders;
+using UnityEditor.AddressableAssets.Settings;
 using UnityEngine;
 
 namespace ContentRepo.Editor
 {
     /// <summary>
-    /// Automatically keeps Addressables groups in sync with checked-out content packages
-    /// whenever the editor is about to enter Play Mode.
+    /// Keeps the Addressables groups of this machine's checked-out content packages in sync whenever the
+    /// editor is about to enter Play Mode.
     ///
-    /// For every subfolder found under <see cref="ContentRepoSettings.LocalPath"/> (excluding
-    /// the internal <c>_groups</c> folder) the script checks whether the corresponding
-    /// Addressables group is missing or has assets that aren't registered yet, and silently
-    /// fixes both conditions. Custom addresses on existing entries are preserved — only new
-    /// assets are added and stale entries are removed.
+    /// The packages are the ones in the sparse cone (<see cref="ContentGroupRegistry.ActivePackages"/>), not
+    /// every folder on disk: Unity recreates an empty folder for every top-level package .meta. For each one
+    /// the canonical group (<c>_groups/&lt;pkg&gt;.asset</c>) is registered in memory, created at that path if the
+    /// package has none yet, and synced with the folder: new assets are added, stale entries removed, and
+    /// custom addresses on existing entries preserved.
     ///
     /// In addition, every checked-out package that does not already have a
     /// <see cref="LocalDevMode.LocalBundles"/> override registered is automatically registered
@@ -23,10 +25,6 @@ namespace ContentRepo.Editor
     /// Addressables Play Mode Script (a per-user setting) is switched to <em>Use Asset Database
     /// (fastest)</em> so the assets are served directly without any bundle build, or to
     /// <em>Use Existing Build</em> when a package has a LocalBundles override.
-    ///
-    /// The check runs on <see cref="PlayModeStateChange.ExitingEditMode"/> so it is always
-    /// up-to-date before any test or game session starts, without requiring manual action
-    /// from the developer.
     /// </summary>
     [InitializeOnLoad]
     internal static class ContentGroupAutoSetup
@@ -56,56 +54,29 @@ namespace ContentRepo.Editor
             var addressableSettings = AddressableAssetSettingsDefaultObject.Settings;
             if (addressableSettings == null) return;
 
-            // Enumerate direct subfolders of the content root.  Each subfolder that is not
-            // the internal _groups folder is treated as a content package.
-            var subFolders = AssetDatabase.GetSubFolders(repoLocalPath);
-            if (subFolders == null || subFolders.Length == 0) return;
+            ContentGroupRegistry.Reconcile();
+            var packages = ContentGroupRegistry.ActivePackages();
+            if (packages.Count == 0) return;
 
-            var cone = ContentGitApi.ReadConeFolders();
-            subFolders = subFolders
-                .Where(f =>
-                {
-                    var name = System.IO.Path.GetFileName(f);
-                    return cone.Contains(name) || ContentGitApi.FolderHasFiles(name);
-                })
-                .ToArray();
-
-            var anyChange = false;
-            var anyLocalPackage = false;
-            var changedGroups = new System.Collections.Generic.List<UnityEditor.AddressableAssets.Settings.AddressableAssetGroup>();
-            foreach (var folderPath in subFolders)
+            var changedGroups = new List<AddressableAssetGroup>();
+            foreach (var packageName in packages)
             {
-                var packageName = System.IO.Path.GetFileName(folderPath);
-                if (string.IsNullOrEmpty(packageName)) continue;
-
-                // Skip the internal _groups folder used by ContentGitApi.
-                if (packageName.Equals(ContentGitApi.GroupsFolderName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (NeedsSync(addressableSettings, packageName, folderPath))
+                var folderPath = $"{repoLocalPath}/{packageName}";
+                if (NeedsSync(packageName, folderPath))
                 {
                     try
                     {
-                        ContentLocalDevApi.EnsureGroupPopulated(
-                            addressableSettings,
-                            packageName,
-                            msg => Debug.Log(msg));
+                        var group = ContentLocalDevApi.EnsureGroupPopulated(addressableSettings, packageName, msg => Debug.Log(msg));
 
                         // Apply the package-name label so label-based queries in
                         // ContentLoadingTest and ContentRepoRuntime work correctly.
-                        var group = addressableSettings.FindGroup(packageName);
-                        if (group != null)
-                        {
-                            foreach (var entry in group.entries)
-                                entry.SetLabel(packageName, true, true, false);
-                            changedGroups.Add(group);
-                        }
-
-                        anyChange = true;
+                        foreach (var entry in group.entries)
+                            entry.SetLabel(packageName, true, true, false);
+                        changedGroups.Add(group);
                     }
                     catch (Exception ex)
                     {
-                        Debug.LogWarning($"[ContentRepo] Auto-setup failed for package '{packageName}': {ex.Message}");
+                        Debug.LogError($"[ContentRepo] Auto-setup failed for package '{packageName}': {ex.Message}");
                     }
                 }
 
@@ -116,74 +87,40 @@ namespace ContentRepo.Editor
                     || existingEntry.Mode != LocalDevMode.LocalBundles)
                 {
                     ContentLocalDevOverrides.Register(packageName, LocalDevMode.AssetDatabase);
-                    anyLocalPackage = true;
-                }
-                else
-                {
-                    // Package has a LocalBundles override — keep it, but still note local presence.
-                    anyLocalPackage = true;
                 }
             }
 
-            if (anyChange)
-            {
-                foreach (var group in changedGroups) ContentAssetSaving.SaveGroup(group);
-                ContentAssetSaving.SaveSettings(addressableSettings);
-            }
-
-            if (anyLocalPackage)
-                ContentLocalDevApi.SaveToPrefs();
+            foreach (var group in changedGroups) ContentAssetSaving.SaveGroup(group);
+            ContentAssetSaving.SaveSettings(addressableSettings);
+            ContentLocalDevApi.SaveToPrefs();
 
             // Switch the per-user Play Mode Script to match the dominant local-dev mode:
             // "Use Existing Build" if any package uses LocalBundles, otherwise "Use Asset Database".
-            if (anyLocalPackage)
-            {
-                var hasLocalBundles = false;
-                foreach (var folderPath in subFolders)
-                {
-                    var packageName = System.IO.Path.GetFileName(folderPath);
-                    if (string.IsNullOrEmpty(packageName)) continue;
-                    if (packageName.Equals(ContentGitApi.GroupsFolderName, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (ContentLocalDevOverrides.TryGet(packageName, out var e) && e.Mode == LocalDevMode.LocalBundles)
-                    {
-                        hasLocalBundles = true;
-                        break;
-                    }
-                }
-
-                if (hasLocalBundles) ContentAssetSaving.UsePlayModeScript<BuildScriptPackedPlayMode>(addressableSettings, Debug.Log);
-                else ContentAssetSaving.UsePlayModeScript<BuildScriptFastMode>(addressableSettings, Debug.Log);
-            }
+            var hasLocalBundles = packages.Any(p => ContentLocalDevOverrides.TryGet(p, out var e) && e.Mode == LocalDevMode.LocalBundles);
+            if (hasLocalBundles) ContentAssetSaving.UsePlayModeScript<BuildScriptPackedPlayMode>(addressableSettings, Debug.Log);
+            else ContentAssetSaving.UsePlayModeScript<BuildScriptFastMode>(addressableSettings, Debug.Log);
         }
 
         /// <summary>
-        /// Returns <c>true</c> when the Addressables group for <paramref name="packageName"/>
-        /// either does not exist yet, or is missing at least one asset that is present in
-        /// <paramref name="folderPath"/> on disk (i.e. the group needs to be re-synced).
+        /// Returns <c>true</c> when the package's canonical group does not exist yet, is not registered, or
+        /// differs from the assets on disk in <paramref name="folderPath"/>.
         /// </summary>
-        private static bool NeedsSync(
-            UnityEditor.AddressableAssets.Settings.AddressableAssetSettings settings,
-            string packageName,
-            string folderPath)
+        private static bool NeedsSync(string packageName, string folderPath)
         {
-            var group = settings.FindGroup(packageName);
-            if (group == null) return true;  // group doesn't exist yet
+            var group = AssetDatabase.LoadAssetAtPath<AddressableAssetGroup>(ContentGroupRegistry.CanonicalGroupPath(packageName));
+            if (group == null) return true;
 
-            // Collect asset GUIDs that are currently on disk in the package folder.
+            var settings = AddressableAssetSettingsDefaultObject.Settings;
+            if (settings == null || !settings.groups.Contains(group)) return true;
+
             var diskGuids = AssetDatabase.FindAssets("", new[] { folderPath })
                 .Where(g => !AssetDatabase.IsValidFolder(AssetDatabase.GUIDToAssetPath(g)))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (diskGuids.Count == 0) return false;  // empty folder — nothing to sync
+            if (diskGuids.Count == 0) return false;
 
-            var groupGuids = new System.Collections.Generic.HashSet<string>(
-                group.entries.Select(e => e.guid),
-                StringComparer.OrdinalIgnoreCase);
-
-            // Sync is needed if any disk asset is absent from the group, or
-            // if the group references assets that are no longer on disk.
-            return diskGuids.Any(g => !groupGuids.Contains(g))
-                || groupGuids.Any(g => !diskGuids.Contains(g));
+            var groupGuids = new HashSet<string>(group.entries.Select(e => e.guid), StringComparer.OrdinalIgnoreCase);
+            return diskGuids.Any(g => !groupGuids.Contains(g)) || groupGuids.Any(g => !diskGuids.Contains(g));
         }
     }
 }

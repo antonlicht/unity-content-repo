@@ -183,10 +183,33 @@ The process exits `0` on success and `1` on failure.
    served from the AssetDatabase even before any build or upload.
 4. When ready, click **Build** then **Upload** on the package row (or **Build and Deploy**).
 
-> The first build creates the Addressables group `Episode02` and its group file `_groups/Episode02.asset`
-> inside the content repo. **Commit and push this file** — it stores the group's stable GUID and any
-> custom addresses, and is restored automatically when any developer checks out the package. You do not
-> need to create Addressables groups or configure remote build/load paths by hand; the build does it.
+> The first Play or build creates the Addressables group `Episode02` and its group file
+> `_groups/Episode02.asset` inside the content repo. **Commit and push this file** — it stores the group's
+> stable GUID (the package's bundle identity) and any custom addresses. You do not need to create
+> Addressables groups or configure remote build/load paths by hand; the build does it.
+
+## Addressables groups and partial checkouts
+
+Each developer checks out only some packages, so which content groups are registered is machine state.
+The tooling keeps it out of the shared project:
+
+- The committed `AddressableAssetSettings.asset` never lists a content group. On every machine the
+  registered content groups are exactly `_groups/<pkg>.asset` for each package in the sparse checkout;
+  they are registered in memory when the editor loads, after checkout, disconnect and pulls, and before
+  Play and builds. Whenever the settings are saved, content groups are left out of the file (a save
+  hook removes them for the save and puts them back right after).
+- A package's group is always looked up by its path, never by name, and created only for a checked-out
+  package that has no committed group yet. Moving a new group or its schemas into `_groups/` must
+  succeed or the operation fails.
+- Groups of packages that are not checked out are never registered, so Addressables never purges their
+  entries, and their files are never written on that machine. `_groups/` always holds every package's
+  files exactly as committed.
+- Disconnect, checkout, rename and delete only change the content repo and in-memory state. Content
+  Browser commits contain only the package's own folder and group files.
+- A group named like a package that lives outside the content repo (for example created by an old
+  tool version in `AddressableAssetsData/AssetGroups`) is reported, and Play Mode setup and builds of
+  that package are blocked until it is migrated into `_groups/<pkg>.asset` and removed, because its
+  `m_GUID` decides the bundle identity.
 
 ---
 
@@ -248,7 +271,10 @@ every catalog regardless.
 - **Local Dev: `'{path}' not found in the Asset Database`** — check out the folder first.
 - **Local Dev: `No assets found under '…'`** — Unity hasn't imported the files yet. Check the Console for import errors.
 - **New package not loading in Play Mode** — it isn't in the CDN manifest yet, but a checked-out package is auto-registered for Fast Mode; make sure the folder is actually checked out and contains assets.
-- **Addressables group is empty after checkout** — the group asset is restored from `_groups/` automatically on checkout. If it still appears empty, the group file may not have been committed to the content repo yet; run the first build and push `_groups/<packageName>.asset`.
+- **Addressables group is empty after checkout** — the group asset is restored from `_groups/` automatically on checkout (a local modification is copied to `Library/ContentRepo/Backups/` first). If it still appears empty, the group file may not have been committed to the content repo yet; enter Play Mode or run the first build and push `_groups/<packageName>.asset`.
+- **`Two Addressables groups are named '<pkg>'`** — a duplicate of the package's group exists outside the content repo. Move its entries (and, to keep the CDN bundle identity, its `m_GUID`) into `_groups/<pkg>.asset`, then delete the duplicate.
+- **`The group for '<pkg>' is committed … but missing on disk`** — pull the content repo or check the package out again; creating a new group would change the package's bundle identity.
+- **`Not saving '_groups/<pkg>…': its package is not checked out`** — something modified the group of a package this machine doesn't have; the change is discarded on purpose and the file stays as committed.
 - **CloudFront `TooManyInvalidationsInProgress`** — free quota is 1 000 paths/month. Batch uploads or wait for the previous invalidation to complete.
 - **CDN serves stale content after upload** — the Upload action invalidates the uploaded prefix and the manifest path automatically. If you pushed manually, run `aws cloudfront create-invalidation` yourself.
 - **Runtime: `Manifest fetch failed … Falling back to cache`** — the app booted offline from a cached manifest. Fix CDN connectivity or certificate issues on the device.

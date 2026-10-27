@@ -57,7 +57,7 @@ Per-package row actions:
 | Commit & Push | Push button, or right-click a changed file → **Commit and push…** |
 | Build / Upload / Promote | Per-row **Build**, **Upload**, and **Promote** buttons (Promote appears only when staging is ahead of production) |
 | Rename | ⋮ menu → **Rename Package** |
-| Disconnect | ⋮ menu → **Disconnect** (removes the folder from sparse-checkout and deletes the local files) |
+| Disconnect | ⋮ menu → **Disconnect** (removes the folder from sparse-checkout and deletes the local files; the package's group files and the project's Addressables settings are left untouched) |
 | Delete from repository | ⋮ menu → **Delete from repository** |
 
 The `+` row creates a new package **folder locally** and adds it to the sparse-checkout. Git can't
