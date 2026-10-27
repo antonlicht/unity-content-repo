@@ -32,7 +32,9 @@ Or add via **Window > Package Manager** using a git URL.
 2. Commit `ProjectSettings/ContentRepo.asset`, `ContentRepoBuild.asset`, `ContentRepoGeneration.asset`,
    and `ContentRepoUpload.asset` so the whole team shares the settings.
 3. Open **Window > Content Browser** (or click the cloud icon in the main editor toolbar), then click
-   **Initialize** to clone the content repository.
+   **Initialize** to clone the content repository. Git LFS must be installed: the content repository keeps
+   images, audio, video, models and fonts in LFS, so a partial checkout downloads only the binaries of the
+   packages it checks out. The tool sets up the LFS hooks in the clone.
 4. Follow **[Documentation/Setup-AWS.md](Documentation/Setup-AWS.md)** to set up the CDN infrastructure.
 
 ---
