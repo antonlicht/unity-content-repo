@@ -208,7 +208,11 @@ namespace ContentRepo.Editor
             }
 
             var schema = group.GetSchema<BundledAssetGroupSchema>();
-            if (schema != null) schema.IncludeInBuild = false;
+            if (schema != null)
+            {
+                schema.IncludeInBuild = false;
+                ContentBuildApi.ApplyRemoteSchemaSettings(settings, schema);
+            }
             MoveSchemasIntoGroupsFolder(group);
             log?.Invoke($"[ContentRepo] Created group '{package}' at '{path}'.");
             return group;

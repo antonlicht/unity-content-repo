@@ -450,6 +450,24 @@ namespace ContentRepo.Editor
         private static string BuildTimestampKey(string contentPackageName, string platform) =>
             $"ContentRepo.LastBuild.{Application.dataPath.GetHashCode():X}.{platform}.{contentPackageName}";
 
+        /// <summary>
+        /// Points a content group's schema at the remote build and load path variables with hash-only bundle names,
+        /// exactly as a content build sets them, when those profile variables exist. New groups get this right away,
+        /// so their first commit already matches what every build writes instead of showing a schema change afterwards.
+        /// </summary>
+        internal static void ApplyRemoteSchemaSettings(AddressableAssetSettings settings, BundledAssetGroupSchema schema)
+        {
+            if (settings == null || schema == null) return;
+            var buildSettings = ContentBuildSettings.instance;
+            var profileId = settings.activeProfileId;
+            if (string.IsNullOrEmpty(settings.profileSettings.GetValueByName(profileId, buildSettings.RemoteBuildPathVariableName)) ||
+                string.IsNullOrEmpty(settings.profileSettings.GetValueByName(profileId, buildSettings.RemoteLoadPathVariableName)))
+                return;
+            schema.BuildPath.SetVariableByName(settings, buildSettings.RemoteBuildPathVariableName);
+            schema.LoadPath.SetVariableByName(settings, buildSettings.RemoteLoadPathVariableName);
+            schema.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.OnlyHash;
+        }
+
         private static void EnsureProfileVariable(AddressableAssetSettings settings,
             string variableName, string defaultValue, BuildLogHandler log)
         {
