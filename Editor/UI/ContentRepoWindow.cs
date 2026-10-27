@@ -277,6 +277,9 @@ namespace ContentRepo.Editor
             remoteFolders.Clear(); repoFolders.Clear(); checkedOutFolders.Clear(); folderStatuses.Clear();
             if (isInitialized != true) return;
 
+            try { await ContentGitApi.RepairIndexAsync(); }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not repair the content repo index: {ex.Message}"); }
+
             try { remoteFolders = await ContentGitApi.GetRemoteFoldersAsync(); }
             catch (Exception ex) { Debug.LogWarning($"Remote folders: {ex.Message}"); }
             repoFolders = new HashSet<string>(remoteFolders, StringComparer.OrdinalIgnoreCase);
@@ -287,6 +290,12 @@ namespace ContentRepo.Editor
             var diskFolders = new List<string>();
             try { diskFolders = await ContentGitApi.GetLocalFoldersOnDiskAsync(); }
             catch (Exception ex) { Debug.LogWarning($"Disk folders: {ex.Message}"); }
+
+            // Unity recreates an empty folder for every top-level package .meta (always checked out in
+            // cone mode). Such a folder is not content on disk and must not pull the package into the cone.
+            diskFolders = diskFolders
+                .Where(f => checkedOutFolders.Any(c => c.Equals(f, StringComparison.OrdinalIgnoreCase)) || ContentGitApi.FolderHasFiles(f))
+                .ToList();
 
             var allStatuses = await ContentGitApi.GetAllFolderStatusesAsync();
             MergeGroupsStatusInto(checkedOutFolders, allStatuses);
@@ -1258,10 +1267,7 @@ namespace ContentRepo.Editor
             var parts = repoRelativePath.Replace('\\', '/').Split('/');
             if (parts.Length != 2 || !parts[0].Equals(ContentGitApi.GroupsFolderName, StringComparison.OrdinalIgnoreCase))
                 return null;
-            var file = parts[1];
-            if (file.EndsWith(".meta",  StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 5);
-            if (file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)) file = file.Substring(0, file.Length - 6);
-            return string.IsNullOrEmpty(file) ? null : file;
+            return ContentGitApi.PackageOfGroupFile(parts[1]);
         }
 
         // ── Utilities ─────────────────────────────────────────────────────────

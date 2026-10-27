@@ -40,7 +40,11 @@ namespace ContentRepo.Editor
 
     public static class ContentLocalDevApi
     {
-        private const string PrefsKey = "ContentRepo.LocalDevOverrides";
+        private const string LegacyPrefsKey = "ContentRepo.LocalDevOverrides";
+
+        // EditorPrefs are shared by every project on the machine; key the overrides by project so
+        // opening another project with this package never clears or applies this project's overrides.
+        private static string PrefsKey => $"{LegacyPrefsKey}:{Application.dataPath}";
 
         // ── AssetDatabase (Fast Mode) ─────────────────────────────────────────
 
@@ -151,7 +155,9 @@ namespace ContentRepo.Editor
         internal static void RestoreFromPrefs()
         {
             ContentLocalDevOverrides.Clear();
-            var json = EditorPrefs.GetString(PrefsKey, null);
+            var json = EditorPrefs.HasKey(PrefsKey)
+                ? EditorPrefs.GetString(PrefsKey, null)
+                : EditorPrefs.GetString(LegacyPrefsKey, null);
             if (string.IsNullOrEmpty(json)) return;
             LocalDevSaveData data;
             try { data = JsonUtility.FromJson<LocalDevSaveData>(json); }

@@ -61,6 +61,15 @@ namespace ContentRepo.Editor
             var subFolders = AssetDatabase.GetSubFolders(repoLocalPath);
             if (subFolders == null || subFolders.Length == 0) return;
 
+            var cone = ContentGitApi.ReadConeFolders();
+            subFolders = subFolders
+                .Where(f =>
+                {
+                    var name = System.IO.Path.GetFileName(f);
+                    return cone.Contains(name) || ContentGitApi.FolderHasFiles(name);
+                })
+                .ToArray();
+
             var anyChange = false;
             var anyLocalPackage = false;
             var changedGroups = new System.Collections.Generic.List<UnityEditor.AddressableAssets.Settings.AddressableAssetGroup>();
