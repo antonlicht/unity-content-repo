@@ -333,8 +333,8 @@ namespace ContentRepo.Editor
         internal static Color Tint(string name) => name switch
         {
             "team" => Pro ? new Color(0.72f, 0.58f, 0.96f) : new Color(0.46f, 0.30f, 0.74f),
-            "test" => Pro ? new Color(0.35f, 0.59f, 0.94f) : new Color(0.13f, 0.38f, 0.78f),
-            "live" => Pro ? new Color(0.31f, 0.78f, 0.39f) : new Color(0.10f, 0.50f, 0.20f),
+            "test" => Pro ? new Color(0.31f, 0.78f, 0.39f) : new Color(0.10f, 0.50f, 0.20f),
+            "live" => Pro ? new Color(0.35f, 0.59f, 0.94f) : new Color(0.13f, 0.38f, 0.78f),
             "warn" => Pro ? new Color(1f, 0.80f, 0.43f) : new Color(0.62f, 0.40f, 0f),
             "error" => Pro ? new Color(1f, 0.55f, 0.52f) : new Color(0.75f, 0.15f, 0.12f),
             _ => Pro ? new Color(0.68f, 0.68f, 0.68f) : new Color(0.38f, 0.38f, 0.38f),

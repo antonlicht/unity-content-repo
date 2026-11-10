@@ -17,7 +17,7 @@ button: arrow-up-from-line | Commit & push | Write a short note about what you c
 
 ::: stage test | Test version | {{test-version-audience: Builds that load staging show it. Also called staging.}} | upload
 button: hammer | Build | Packs the package for the game.
-button: cloud-upload | Upload | Puts it into the test version. The blue staging badge gets a tick when it matches what you pushed. | It can take a minute or two to arrive.
+button: cloud-upload | Upload | Puts it into the test version. The green staging badge gets a tick when it matches what you pushed. | It can take a minute or two to arrive.
 step: circle-check | Check it | {{check-it: Play it in a build that loads the test version.}} | {{check-it-tip: Unity keeps using your own copy while the package is checked out, so a build is the real check.}}
 :::
 
@@ -68,7 +68,7 @@ Hover over a badge in the Content Browser to see more about it.
 | You see | What it means | What to do |
 |---|---|---|
 | <warn>2 to pull</warn> | Teammates pushed changes you do not have yet. | Pull. |
-| <test>staging</test> or <live>production</live> with a tick | The test (blue) or live (green) version matches what is pushed. | Nothing. |
+| <test>staging</test> or <live>production</live> with a tick | The test (green) or live (blue) version matches what is pushed. | Nothing. |
 | <warn>· 3 behind</warn> | Newer work is pushed but not uploaded yet (staging) or not promoted yet (production). | Build and upload, or promote once you have checked it. |
 | <warn>· differs</warn>, <warn>· unverified</warn> | The uploaded version does not match pushed work. | Build and upload again. |
 | <warn>· not in repo</warn> | Someone uploaded changes that were never pushed. | Ask whoever uploaded it to push, then build and upload again. Do not promote it. |
