@@ -1355,9 +1355,10 @@ namespace ContentRepo.Editor
                 touched.AddRange(SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off diff --name-only HEAD -- {paths}", root)));
                 touched.AddRange(SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off ls-files --others --exclude-standard -- {paths}", root)));
             }
-            if (touched.Count > 0)
+            var conflicts = await LocalChangesThatDifferAsync(touched, pending, root);
+            if (conflicts.Count > 0)
                 throw new InvalidOperationException(
-                    $"{touched.Count} file(s) the restore would overwrite have local changes, for example {touched[0]}. Commit or discard them first.");
+                    $"{conflicts.Count} file(s) the restore would overwrite have local changes, for example {conflicts[0]}. Commit or discard them first.");
 
             var applied = new List<string>();
             AssetDatabase.StartAssetEditing();
@@ -1393,7 +1394,125 @@ namespace ContentRepo.Editor
             return pending.Count;
         }
 
-        private static async Task UndoRestoreAsync(List<string> paths, string root)
+        /// <summary>
+        /// The local changes among the files a restore would write that really conflict with it. A file whose content
+        /// already is the lost version (for example because a tool wrote it again) or a lost deletion that is already
+        /// gone does not count.
+        /// </summary>
+        private static async Task<List<string>> LocalChangesThatDifferAsync(List<string> touched, List<ContentLostFile> pending, string root)
+        {
+            var byPath = pending.ToDictionary(file => file.Path, StringComparer.Ordinal);
+            var conflicts = new List<string>();
+            var toHash = new List<string>();
+            foreach (var path in touched.Distinct(StringComparer.Ordinal))
+            {
+                var exists = File.Exists(Path.Combine(root, path));
+                if (!byPath.TryGetValue(path, out var file) || !file.Delete && !exists) conflicts.Add(path);
+                else if (!file.Delete) toHash.Add(path);
+                else if (exists) conflicts.Add(path);
+            }
+            foreach (var batch in ContentSyncApi.Batches(toHash, 100))
+            {
+                var hashes = SplitPaths(await RunGitCommandAsync($"hash-object -- {string.Join(" ", batch.Select(Quote))}", root));
+                for (var i = 0; i < batch.Count; i++)
+                    if (i >= hashes.Count || hashes[i] != byPath[batch[i]].Blob) conflicts.Add(batch[i]);
+            }
+            return conflicts;
+        }
+
+        /// <summary>
+        /// Takes restored files out of this copy again: each goes back to its committed version. Files edited since
+        /// the restore stay as they are, together with their .meta files, and so do restored files that are already
+        /// committed. Returns how many files were put back.
+        /// </summary>
+        public static async Task<int> UndoRestoreLostChangesAsync(ContentLossDetails details)
+        {
+            ValidateFolderName(details.Package);
+            await ThrowIfOperationInProgressAsync("undo a restore");
+            var root = ContentAbsolutePath;
+            var restored = details.Files.Where(file => file.RestoredLocally && !file.Committed).Select(file => file.Path).ToList();
+            if (restored.Count == 0)
+            {
+                if (details.CommittedCount > 0)
+                    throw new InvalidOperationException("The restored files are already committed on this computer, so there is nothing to undo.");
+                return 0;
+            }
+
+            var edited = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var batch in ContentSyncApi.Batches(restored, 100))
+                foreach (var path in SplitPaths(await RunGitCommandAsync(
+                             $"-c core.quotepath=off diff --name-only -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root)))
+                    edited.Add(path);
+            var editedCount = edited.Count;
+            var restoredSet = new HashSet<string>(restored, StringComparer.Ordinal);
+            foreach (var path in edited.ToList())
+            {
+                var companion = path.EndsWith(".meta", StringComparison.Ordinal) ? path.Substring(0, path.Length - 5) : path + ".meta";
+                if (restoredSet.Contains(companion)) edited.Add(companion);
+            }
+            var undo = restored.Where(path => !edited.Contains(path)).ToList();
+
+            AssetDatabase.StartAssetEditing();
+            try { await UndoRestoreAsync(undo, root, rethrow: true); }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
+            var kept = new List<string>();
+            if (editedCount > 0) kept.Add($"{editedCount} restored file(s) were edited after the restore and were kept, together with their .meta files.");
+            if (details.CommittedCount > 0) kept.Add($"{details.CommittedCount} restored file(s) are already committed and were kept.");
+            if (kept.Count > 0) LastWarning = string.Join(" ", kept);
+            return undo.Count;
+        }
+
+        /// <summary>
+        /// Writes the lost version of a file to the project's Temp folder, outside the content repository, so it can be
+        /// opened without changing anything. Returns the path of the written file.
+        /// </summary>
+        public static async Task<string> ExtractLostVersionAsync(ContentLostFile file)
+        {
+            if (file.Delete || string.IsNullOrEmpty(file.Blob))
+                throw new InvalidOperationException($"'{file.Path}' was removed in the lost version, so there is nothing to open.");
+            var relative = file.Path.Replace('/', Path.DirectorySeparatorChar);
+            var name = $"{Path.GetFileNameWithoutExtension(relative)} (lost version){Path.GetExtension(relative)}";
+            var target = Path.Combine(ProjectRoot, "Temp", "ContentRepoPreview", Path.GetDirectoryName(relative) ?? "", name);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            var root = ContentAbsolutePath;
+            var blob = file.Blob;
+            await Task.Run(() =>
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"cat-file blob {blob}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = root,
+                };
+                using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'git'.");
+                var error = process.StandardError.ReadToEndAsync();
+                try
+                {
+                    using var output = File.Create(target);
+                    process.StandardOutput.BaseStream.CopyTo(output);
+                }
+                catch (IOException ex)
+                {
+                    try { process.Kill(); } catch (InvalidOperationException) { }
+                    throw new InvalidOperationException($"'{name}' is still open in another program. Close it there, then click Open again.", ex);
+                }
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                    throw new InvalidOperationException($"git cat-file blob {blob} failed (exit {process.ExitCode}): {error.Result.Trim()}");
+            });
+            return target;
+        }
+
+        private static async Task UndoRestoreAsync(List<string> paths, string root, bool rethrow = false)
         {
             try
             {
@@ -1408,13 +1527,28 @@ namespace ContentRepo.Editor
                 }
                 foreach (var batch in ContentSyncApi.Batches(committed, 100))
                     await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
-                foreach (var path in paths.Where(path => !committed.Contains(path)))
+                var removed = paths.Where(path => !committed.Contains(path)).ToList();
+                var failed = new List<string>();
+                foreach (var path in removed)
                 {
                     var full = Path.Combine(root, path);
-                    if (File.Exists(full)) File.Delete(full);
+                    try { if (File.Exists(full)) File.Delete(full); }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { failed.Add(path); }
                 }
+                foreach (var folder in removed
+                             .Where(path => path.EndsWith(".meta", StringComparison.Ordinal))
+                             .Select(path => path.Substring(0, path.Length - 5))
+                             .Where(folder => folder.Contains('/'))
+                             .OrderByDescending(folder => folder.Count(c => c == '/')))
+                {
+                    var full = Path.Combine(root, folder);
+                    try { if (Directory.Exists(full) && !Directory.EnumerateFileSystemEntries(full).Any()) Directory.Delete(full); }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+                }
+                if (failed.Count > 0)
+                    throw new IOException($"{failed.Count} file(s) could not be deleted, for example {failed[0]}. Close the programs that have them open, then try again.");
             }
-            catch (Exception ex) { Debug.LogError($"[ContentRepo] Could not undo a failed restore completely: {ex.Message}"); }
+            catch (Exception ex) when (!rethrow) { Debug.LogError($"[ContentRepo] Could not undo a failed restore completely: {ex.Message}"); }
         }
 
         /// <summary>Aborts the merge, rebase, cherry-pick or revert in progress and returns to the state before it.</summary>

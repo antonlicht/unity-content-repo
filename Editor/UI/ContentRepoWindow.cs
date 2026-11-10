@@ -136,6 +136,9 @@ namespace ContentRepo.Editor
             abortOperationBtn = Q<Button>("btn-abort-operation");
 
             // Top bar — buttons then their icon images, left to right
+            if (Q<Image>("img-instructions") is { } instructionsImg) instructionsImg.image = LoadIcon("book-text");
+            if (Q<ToolbarButton>("btn-instructions") is { } instructionsBtn) instructionsBtn.clicked += () => ContentGuideWindow.Open();
+
             refreshBtn          = Q<Button>("btn-refresh");
             Q<Image>("img-refresh").image   = LoadIcon("refresh-cw");
             pullAllBtn          = Q<Button>("btn-pull-all");
@@ -1287,10 +1290,30 @@ namespace ContentRepo.Editor
             SetStatus("Ready");
             var checkedOut = checkedOutFolders.Any(f => f.Equals(package, StringComparison.OrdinalIgnoreCase));
             var unpulled = checkedOut ? (await ContentSyncApi.GetUnpulledCommitsAsync(package)).Count : 0;
-            LostChangesWindow.Show(details, checkedOut, unpulled, confirmed =>
+            LostChangesWindow.Show(details, checkedOut, unpulled, new LostChangesWindow.Actions
+            {
+                Pull = () =>
+                {
+                    if (busy) return false;
+                    _ = PullThenShowLostChangesAsync(package);
+                    return true;
+                },
+                Undo = confirmed =>
+                {
+                    if (busy) return false;
+                    _ = RunAsync($"Undoing the restore of '{package}'…", dialogOnError: true, op: async () =>
+                    {
+                        var current = await ContentSyncApi.GetLossDetailsAsync(package)
+                            ?? throw new InvalidOperationException($"'{package}' has no lost changes on {ContentSyncApi.RemoteRef} any more. Nothing was undone.");
+                        var undone = await ContentGitApi.UndoRestoreLostChangesAsync(current);
+                        AppendDeployLog($"[Restore] '{package}': {undone} restored file(s) put back to their committed version.");
+                    });
+                    return true;
+                },
+                Restore = confirmed =>
             {
                 if (busy) return false;
-                _ = RunAsync($"Restoring the lost changes of '{package}'…", async () =>
+                _ = RunAsync($"Restoring the lost changes of '{package}'…", dialogOnError: true, op: async () =>
                 {
                     // Work from the repository as it is now, not as it was when the window opened.
                     var current = await ContentSyncApi.GetLossDetailsAsync(package)
@@ -1302,7 +1325,14 @@ namespace ContentRepo.Editor
                                     "Check them, then commit and push. The red badge clears once the push reaches the remote.");
                 });
                 return true;
+            },
             });
+        }
+
+        private async System.Threading.Tasks.Task PullThenShowLostChangesAsync(string package)
+        {
+            if (await RunAsync($"Pulling '{package}'…", () => ContentGitApi.PullFolderAsync(package), dialogOnError: true))
+                await ShowLostChangesAsync(package);
         }
 
         private static VisualElement MakeIconBadge(string text, string icon, string stateClass, string tooltip)
@@ -1320,13 +1350,20 @@ namespace ContentRepo.Editor
 
         // ── Async runners ─────────────────────────────────────────────────────
 
-        private async Task RunAsync(string statusMessage, Func<Task> op)
+        private async Task<bool> RunAsync(string statusMessage, Func<Task> op, bool dialogOnError = false)
         {
-            if (busy) return;
+            if (busy) return false;
             ContentGitApi.ClearLastWarning();
             SetBusy(true, statusMessage);
             try { await op(); }
-            catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); SetBusy(false); return; }
+            catch (Exception ex)
+            {
+                SetStatus($"Error: {ex.Message}");
+                Debug.LogException(ex);
+                SetBusy(false);
+                if (dialogOnError) EditorUtility.DisplayDialog("Content Browser", ex.Message, "OK");
+                return false;
+            }
             try
             {
                 SetStatus("Refreshing…");
@@ -1338,6 +1375,7 @@ namespace ContentRepo.Editor
             }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); }
             finally { SetBusy(false); }
+            return true;
         }
 
         private async Task RunPipelineAsync(string statusMessage, Func<Task> op, Label log)
@@ -1564,7 +1602,7 @@ namespace ContentRepo.Editor
         private void SetButtonsEnabled(bool enabled) =>
             rootVisualElement.Query<Button>().ForEach(b =>
             {
-                if (b.name == "btn-new-folder") return;
+                if (b.name == "btn-new-folder" || b.name == "btn-instructions") return;
                 b.SetEnabled(enabled);
             });
 

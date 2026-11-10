@@ -212,6 +212,27 @@
     -unity-background-scale-mode: scale-to-fit;
 }
 
+.cs-toolbar-text-btn {
+    flex-direction: row;
+    align-items: center;
+    padding-left: 6px;
+    padding-right: 8px;
+}
+
+.cs-toolbar-text-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    margin-right: 5px;
+    -unity-background-scale-mode: scale-to-fit;
+}
+
+.cs-toolbar-text-label {
+    margin: 0;
+    padding: 0;
+    -unity-text-align: middle-left;
+}
+
 .cs-rename-field {
     min-width: 80px;
     max-width: 200px;

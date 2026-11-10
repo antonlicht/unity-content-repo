@@ -42,6 +42,7 @@ namespace ContentRepo.Editor
         internal Dictionary<string, string> Kept = new(StringComparer.Ordinal);
         internal Dictionary<string, string> Expected = new(StringComparer.Ordinal);
         internal Dictionary<string, string> Sources = new(StringComparer.Ordinal);
+        internal Dictionary<string, string> Discarded = new(StringComparer.Ordinal);
     }
 
     /// <summary>A file a merge dropped: restoring it writes the version of <see cref="Source"/>, or deletes it.</summary>
@@ -50,9 +51,17 @@ namespace ContentRepo.Editor
         public string Path;
         public bool Delete;
         public bool RestoredLocally;
+        public bool Committed;
         internal string Source;
         internal string Blob;
         internal string Kept;
+    }
+
+    /// <summary>A commit whose changes the merge threw away, and how many of the lost files came from it.</summary>
+    public sealed class ContentLostWork
+    {
+        public ContentCommit Commit;
+        public int Files;
     }
 
     /// <summary>A file the merge dropped that restoring leaves alone, and why.</summary>
@@ -68,13 +77,16 @@ namespace ContentRepo.Editor
         public string Package;
         public ContentCommit Merge;
         public List<ContentLostFile> Files = new();
-        public List<string> ChangedOnBothSides = new();
+        public List<ContentLostFile> ChangedOnBothSides = new();
         public List<ContentSkippedFile> Skipped = new();
-        public List<ContentCommit> DroppedCommits = new();
+        public List<ContentLostWork> LostWork = new();
+        public int UnattributedFiles;
         public bool ContainsMerge;
         internal string MergeId;
 
         public int RestoredLocallyCount => Files.Count(file => file.RestoredLocally);
+        public int UndoableCount => Files.Count(file => file.RestoredLocally && !file.Committed);
+        public int CommittedCount => Files.Count(file => file.RestoredLocally && file.Committed);
         public int PendingCount => Files.Count(file => !file.RestoredLocally);
     }
 
@@ -298,7 +310,10 @@ namespace ContentRepo.Editor
                             loss.Sources[path] = dropped.Sources[path];
                         }
                         foreach (var path in loss.BothChanged)
+                        {
                             if (dropped.Kept.TryGetValue(path, out var kept)) loss.Kept[path] = kept;
+                            if (dropped.Discarded.TryGetValue(path, out var discarded)) loss.Discarded[path] = discarded;
+                        }
                     }
                 }
             }
@@ -483,7 +498,12 @@ namespace ContentRepo.Editor
             var loss = remote == null ? null : await FindUnrepairedLossAsync(package, remote);
             if (loss == null || loss.MergeId == null) return null;
 
-            var details = new ContentLossDetails { Package = package, Merge = loss.Merge, MergeId = loss.MergeId, ChangedOnBothSides = loss.BothChanged.ToList() };
+            var details = new ContentLossDetails { Package = package, Merge = loss.Merge, MergeId = loss.MergeId };
+            foreach (var path in loss.BothChanged)
+            {
+                loss.Discarded.TryGetValue(path, out var discarded);
+                details.ChangedOnBothSides.Add(new ContentLostFile { Path = path, Delete = discarded == null, Blob = discarded });
+            }
             foreach (var path in loss.Paths)
                 details.Files.Add(new ContentLostFile
                 {
@@ -512,12 +532,15 @@ namespace ContentRepo.Editor
                 foreach (var file in details.Files.ToList())
                 {
                     var present = staged.TryGetValue(file.Path, out var blob);
+                    head.TryGetValue(file.Path, out var committed);
                     file.RestoredLocally = file.Delete
                         ? !present && !File.Exists(Path.Combine(root, file.Path))
                         : present && blob == file.Blob;
-                    if (file.RestoredLocally) continue;
-
-                    head.TryGetValue(file.Path, out var committed);
+                    if (file.RestoredLocally)
+                    {
+                        file.Committed = committed == file.Blob;
+                        continue;
+                    }
                     if (committed == file.Kept || committed == file.Blob) continue;
                     details.Files.Remove(file);
                     details.Skipped.Add(new ContentSkippedFile { Path = file.Path, Reason = "changed by a local commit that is not pushed yet" });
@@ -525,14 +548,46 @@ namespace ContentRepo.Editor
             }
             KeepFolderMetas(details);
 
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var source in details.Files.Select(file => file.Source).Distinct())
-            {
-                var output = await Git($"-c core.quotepath=off log --no-merges --format=%h%x09%ad%x09%an%x09%s --date=short {loss.Base}..{source} -- {await PathSpecAsync(package, loss.Base, source)}");
-                foreach (var commit in SplitLines(output).Select(ParseCommit).Where(commit => commit != null && seen.Add(commit.Sha)))
-                    details.DroppedCommits.Add(commit);
-            }
+            await AttributeLostWorkAsync(details, package, loss.Base);
             return details;
+        }
+
+        /// <summary>
+        /// Finds whose work was lost: for each file, the first commit after the merge base that gave it the version the
+        /// merge threw away (or deleted it). Later commits that only rewrote the same content (such as moving files in and
+        /// out of Git LFS) do not count.
+        /// </summary>
+        private static async Task AttributeLostWorkAsync(ContentLossDetails details, string package, string mergeBase)
+        {
+            const string absent = "0000000000000000000000000000000000000000";
+            var authors = new Dictionary<string, ContentLostWork>(StringComparer.Ordinal);
+            var attributed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var source in details.Files.Select(file => file.Source).Distinct().ToList())
+            {
+                var wanted = details.Files.Where(file => file.Source == source).ToDictionary(file => file.Path, file => file.Blob ?? absent, StringComparer.Ordinal);
+                var output = await Git($"-c core.quotepath=off log --reverse --raw --no-abbrev --no-renames --format=%x01%h%x09%ad%x09%an%x09%s --date=short " +
+                                       $"{mergeBase}..{source} -- {await PathSpecAsync(package, mergeBase, source)}");
+                ContentCommit commit = null;
+                foreach (var line in output.Split('\n'))
+                {
+                    if (line.StartsWith("\u0001", StringComparison.Ordinal))
+                    {
+                        commit = ParseCommit(line.Substring(1).TrimEnd('\r'));
+                        if (commit != null && commit.Sha.Length > 7) commit.Sha = commit.Sha.Substring(0, 7);
+                        continue;
+                    }
+                    if (commit == null || !line.StartsWith(":", StringComparison.Ordinal)) continue;
+                    var tab = line.IndexOf('\t');
+                    if (tab < 0) continue;
+                    var fields = line.Substring(1, tab - 1).Split(' ');
+                    var path = line.Substring(tab + 1).TrimEnd('\r');
+                    if (fields.Length < 4 || !wanted.TryGetValue(path, out var blob) || fields[3] != blob || !attributed.Add(path)) continue;
+                    if (!authors.TryGetValue(commit.Sha, out var work)) authors[commit.Sha] = work = new ContentLostWork { Commit = commit };
+                    work.Files++;
+                }
+            }
+            details.LostWork = authors.Values.OrderBy(work => work.Commit.Date, StringComparer.Ordinal).ToList();
+            details.UnattributedFiles = details.Files.Count(file => !attributed.Contains(file.Path));
         }
 
         /// <summary>
@@ -726,7 +781,10 @@ namespace ContentRepo.Editor
                     loss.Sources[path] = oursChanged ? left : right;
                 }
                 foreach (var path in bothChanged)
+                {
                     loss.Kept[path] = Blob(actual, path);
+                    loss.Discarded[path] = Blob(actual, path) == Blob(ours, path) ? Blob(theirs, path) : Blob(ours, path);
+                }
             }
             MergeLosses[key] = loss;
             return loss;

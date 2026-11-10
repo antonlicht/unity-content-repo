@@ -17,6 +17,10 @@
         </ui:VisualElement>
 
         <editor:Toolbar name="top-bar">
+            <editor:ToolbarButton name="btn-instructions" class="cs-toolbar-text-btn" tooltip="How to change content, test it and make it live">
+                <ui:Image name="img-instructions" class="cs-toolbar-text-icon" picking-mode="Ignore" />
+                <ui:Label text="Instructions" class="cs-toolbar-text-label" picking-mode="Ignore" />
+            </editor:ToolbarButton>
             <editor:ToolbarSpacer style="flex-grow:1;" />
             <editor:ToolbarButton name="btn-refresh"   tooltip="Refresh">
                 <ui:Image name="img-refresh"   class="cs-toolbar-icon" picking-mode="Ignore" />

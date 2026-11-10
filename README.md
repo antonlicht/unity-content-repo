@@ -46,8 +46,9 @@ Or add via **Window > Package Manager** using a git URL.
 Open **Window > Content Browser** (or the cloud icon in the main toolbar). Everything lives in one
 window:
 
-- A top **toolbar** of bulk actions — Refresh, Pull all, Build all, Upload all, Promote all, and a
-  ⋮ "More actions" menu. Each bulk button is hidden until it is relevant.
+- A top **toolbar**: **Instructions** on the left (see [Instructions for your team](#instructions-for-your-team)),
+  and bulk actions on the right — Refresh, Pull all, Build all, Upload all, Promote all, and a ⋮ "More
+  actions" menu. Each bulk button is hidden until it is relevant.
 - A **new-package** row (the `+` icon) for creating a package folder.
 - The **package list**. Each row combines git state and deploy actions.
 - An **Infrastructure** section (deploy/teardown of the cleanup Lambda) and a **Log** pane.
@@ -115,20 +116,28 @@ their `.meta` companions, renames and edits made in the merge commit itself are 
 commits and trees are read, so nothing is downloaded and every package can be checked, checked out or
 not.
 
-**Fixing lost changes.** Click the red `repo lost changes` badge (or ⋮ → **Lost changes…**) to open a window
-that lists the merge, the commits on the side whose changes were dropped, every file to restore grouped by
-folder, the files both sides changed (where the merge kept only one side's version), and files it leaves
-alone (changed by a local commit that is not pushed yet, or a folder `.meta` whose folder still has files). **Copy file list** puts the whole list on the clipboard. On a checked-out package
-that is up to date with the remote, **Restore** writes each dropped file back with the version from the
-commit that changed it (or deletes it, when that change was a deletion) and stages it, together with the
-`.meta` file that belongs to it. It works from the repository as it is when you click, and if anything goes
-wrong midway it puts every file back. Nothing is committed:
+**Fixing lost changes.** Click the red `repo lost changes` badge (or ⋮ → **Lost changes…**) to open the
+**Lost work** window. It says in plain words which merge lost the work and who made it, and lists whose work
+was lost: each commit whose changes were dropped, with its author, date, message and number of files. Below
+that come every file to restore grouped by folder, the files both sides changed (where the merge kept only one
+side's version), and files it leaves alone (changed by a local commit that is not pushed yet, or a folder
+`.meta` whose folder still has files). **Open** next to a file writes a copy of its lost version to
+`Temp/ContentRepoPreview` (named `… (lost version).ext`) and opens it in its default app, without changing
+the package; for files both sides changed it opens the version the merge threw away. **Copy list** puts the
+whole list on the clipboard. On a checked-out package that is up to date with the remote, **Restore** writes
+each dropped file back with the version from the commit that changed it (or deletes it again, when that change
+was a deletion) and stages it, together with the `.meta` file that belongs to it. It works from the repository
+as it is when you click, and if anything goes wrong midway it puts every file back. Nothing is committed:
 
-1. Pull, so the package has no `N to pull` badge, and make sure the files being restored have no local changes.
+1. Pull (the window offers **Pull now** when the copy is behind), and make sure the files being restored have
+   no local changes. A file whose local change already is the lost version (for example because a tool wrote
+   it again) does not count.
 2. Click the red badge, check the list, and click **Restore**. The restored files appear as changes on the row,
    together with the package's group file, which Unity updates to match the restored assets.
 3. Check them in the editor (open the scenes, play through the affected content). Files changed on both sides are not
-   restored: merge them by hand in a git client, or keep them as they are.
+   restored: use **Open** to see the lost version and copy what is missing by hand, or keep them as they are.
+   **Undo restore** takes the restored files out again (files edited since the restore stay, together with
+   their `.meta` files); it is not offered once the restored files are committed.
 4. Commit and push everything from the row. The badge clears once the push reaches the remote.
 5. Build, upload, check that staging shows the check mark, and promote.
 
@@ -151,6 +160,58 @@ Promote of existing builds still work.
 
 See **[Documentation/Pipeline-Usage.md](Documentation/Pipeline-Usage.md)** for the full build, upload,
 promote, and local-dev-override workflow.
+
+---
+
+## Instructions for your team
+
+The **Instructions** button in the Content Browser toolbar (or **Window > Content Browser Instructions**)
+opens a short guide for everyone who works with content, written for people who do not use git: how a
+change goes live as a step-by-step chart, which version each place shows, how to work together, what the
+badges and banners mean, and what to set up on a new computer.
+
+The package's topics are generic and live in `Editor/Guide/Guide.md`. A project adds its own topics,
+replaces or extends the package's ones, and fills in a few named values with files called
+`ContentRepoGuide.md` anywhere under `Assets` (for example `Assets/Editor/ContentRepoGuide.md`). The
+window reloads them whenever it gets focus, and its sidebar links to the project's file.
+
+Each topic starts with a header between `---` lines:
+
+```markdown
+---
+id: menu-texts            # topic id; the package uses release, versions, together, warnings, first-time
+title: Menu texts         # sidebar and page title
+icon: pencil              # an icon of the package (Editor/UI/Icons) or an asset path to a texture
+after: versions           # optional: place the topic after another one
+mode: replace             # replace (default), append, prepend or remove, for an id that already exists
+---
+Text. **Bold**, *italic*, `code`, and coloured words: <copy>your own copy</copy>, <test>test version</test>,
+<live>live version</live>, <team>…</team>, <warn>…</warn>, <error>…</error>.
+
+## A heading
+- A bullet
+| Column | Column |
+|---|---|
+| Cell | Cell |
+> A note box. A line that is only a link becomes a button:
+> [Which version do I see?](#versions)
+[Another topic](#release)
+```
+
+The release chart is written as stages with steps. A step marked `button` gets a grey square behind its icon
+because it is a button in the Content Browser:
+
+```markdown
+::: stage test | Test version | Who sees it. | upload
+button: cloud-upload | Upload | What to do. | An optional grey tip.
+step: circle-check | Check it | What to do.
+:::
+```
+
+The stage key (`computer`, `team`, `test`, `live`) picks the colour, and the last field is the action that
+leads into the stage in the overview strip. Package text can contain `{{name: default}}` values; a project
+sets them in a section with `id: values` and one `name: text` per line. The package's guide uses
+`test-version-audience`, `check-it` and `check-it-tip`, which describe which builds load the test version.
 
 ---
 
