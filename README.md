@@ -115,6 +115,26 @@ their `.meta` companions, renames and edits made in the merge commit itself are 
 commits and trees are read, so nothing is downloaded and every package can be checked, checked out or
 not.
 
+**Fixing lost changes.** Click the red `repo lost changes` badge (or ⋮ → **Lost changes…**) to open a window
+that lists the merge, the commits on the side whose changes were dropped, every file to restore grouped by
+folder, the files both sides changed (where the merge kept only one side's version), and files it leaves
+alone (changed by a local commit that is not pushed yet, or a folder `.meta` whose folder still has files). **Copy file list** puts the whole list on the clipboard. On a checked-out package
+that is up to date with the remote, **Restore** writes each dropped file back with the version from the
+commit that changed it (or deletes it, when that change was a deletion) and stages it, together with the
+`.meta` file that belongs to it. It works from the repository as it is when you click, and if anything goes
+wrong midway it puts every file back. Nothing is committed:
+
+1. Pull, so the package has no `N to pull` badge, and make sure the files being restored have no local changes.
+2. Click the red badge, check the list, and click **Restore**. The restored files appear as changes on the row,
+   together with the package's group file, which Unity updates to match the restored assets.
+3. Check them in the editor (open the scenes, play through the affected content). Files changed on both sides are not
+   restored: merge them by hand in a git client, or keep them as they are.
+4. Commit and push everything from the row. The badge clears once the push reaches the remote.
+5. Build, upload, check that staging shows the check mark, and promote.
+
+Opening the window again shows which files are already restored in this copy, and **Restore** only writes
+the remaining ones. Restoring needs the files' contents, so in a partial clone it downloads them.
+
 When staging differs from production, the per-row **Promote** button (and the toolbar **Promote all**)
 becomes visible. Promote fetches first and warns, listing the reasons, when a staging build that would
 go live does not match the repository (for every platform in it), when the package has lost changes,

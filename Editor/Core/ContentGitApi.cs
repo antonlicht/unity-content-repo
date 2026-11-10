@@ -908,6 +908,7 @@ namespace ContentRepo.Editor
             // plus committed ones that were deleted (not hidden with skip-worktree), so the deletion is committed.
             var groupFiles = GetGroupRelativePaths(folder).ToList();
             var deleted = await GetDeletedGroupFilesAsync(folder, groupFiles);
+            deleted.AddRange((await GetStagedGroupDeletionsAsync(folder)).Where(path => !deleted.Contains(path)));
             if (groupFiles.Count + deleted.Count > 0)
                 await RunGitCommandAsync(
                     $"add --sparse -- {string.Join(" ", groupFiles.Concat(deleted).Select(Quote))}",
@@ -1322,6 +1323,100 @@ namespace ContentRepo.Editor
             catch { return false; }
         }
 
+        /// <summary>
+        /// Puts the files a merge dropped from a package back into this clone: each file gets the version of the commit
+        /// whose change the merge left out, or is deleted when that change was a deletion. The result is staged but not
+        /// committed, so it shows up as changes on the package row to check and then commit and push. Files changed on
+        /// both sides of the merge are left alone. Refuses when the package is not checked out, has unpulled commits, or
+        /// has local changes in files the restore would overwrite.
+        /// </summary>
+        public static async Task<int> RestoreLostChangesAsync(ContentLossDetails details)
+        {
+            var folder = details.Package;
+            ValidateFolderName(folder);
+            await ThrowIfOperationInProgressAsync("restore lost changes");
+            if (!await IsFolderCheckedOutAsync(folder))
+                throw new InvalidOperationException($"Check out '{folder}' before restoring its lost changes.");
+
+            var root = ContentAbsolutePath;
+            var unpulled = await ContentSyncApi.GetUnpulledCommitsAsync(folder);
+            var contained = await RunGitAsync($"merge-base --is-ancestor {details.MergeId} HEAD", root);
+            if (unpulled.Count > 0 || contained.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"Pull first: this copy of '{folder}' is behind the remote, so the restore would apply to an old state.");
+
+            var pending = details.Files.Where(file => !file.RestoredLocally).ToList();
+            if (pending.Count == 0) return 0;
+
+            var touched = new List<string>();
+            foreach (var batch in ContentSyncApi.Batches(pending.Select(file => file.Path), 100))
+            {
+                var paths = string.Join(" ", batch.Select(ContentSyncApi.Literal));
+                touched.AddRange(SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off diff --name-only HEAD -- {paths}", root)));
+                touched.AddRange(SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off ls-files --others --exclude-standard -- {paths}", root)));
+            }
+            if (touched.Count > 0)
+                throw new InvalidOperationException(
+                    $"{touched.Count} file(s) the restore would overwrite have local changes, for example {touched[0]}. Commit or discard them first.");
+
+            var applied = new List<string>();
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var source in pending.Where(file => !file.Delete).GroupBy(file => file.Source))
+                    foreach (var batch in ContentSyncApi.Batches(source.Select(file => file.Path), 100))
+                    {
+                        applied.AddRange(batch);
+                        await RunGitCommandAsync($"checkout {source.Key} -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
+                    }
+                foreach (var batch in ContentSyncApi.Batches(pending.Where(file => file.Delete).Select(file => file.Path), 100))
+                {
+                    applied.AddRange(batch);
+                    await RunGitCommandAsync($"rm -q --ignore-unmatch -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Put every file back before Unity imports anything: a half-restored asset without its .meta would get a
+                // new GUID on import.
+                await UndoRestoreAsync(applied, root);
+                var reason = ex.Message.Length > 300 ? ex.Message.Substring(0, 300) + "…" : ex.Message;
+                throw new InvalidOperationException($"The restore failed and was undone: {reason}", ex);
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
+            Debug.Log($"[ContentRepo] Restored {pending.Count} file(s) of '{folder}' that merge {details.Merge?.Sha} dropped. Check them, then commit and push.");
+            return pending.Count;
+        }
+
+        private static async Task UndoRestoreAsync(List<string> paths, string root)
+        {
+            try
+            {
+                var committed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var batch in ContentSyncApi.Batches(paths, 100))
+                {
+                    var literal = string.Join(" ", batch.Select(ContentSyncApi.Literal));
+                    await RunGitCommandAsync($"reset -q HEAD -- {literal}", root);
+                    foreach (var path in SplitPaths(await RunGitCommandAsync(
+                                 $"-c core.quotepath=off ls-tree -r --name-only HEAD -- {string.Join(" ", batch.Select(Quote))}", root)))
+                        committed.Add(path);
+                }
+                foreach (var batch in ContentSyncApi.Batches(committed, 100))
+                    await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
+                foreach (var path in paths.Where(path => !committed.Contains(path)))
+                {
+                    var full = Path.Combine(root, path);
+                    if (File.Exists(full)) File.Delete(full);
+                }
+            }
+            catch (Exception ex) { Debug.LogError($"[ContentRepo] Could not undo a failed restore completely: {ex.Message}"); }
+        }
+
         /// <summary>Aborts the merge, rebase, cherry-pick or revert in progress and returns to the state before it.</summary>
         public static async Task AbortOperationAsync()
         {
@@ -1531,6 +1626,16 @@ namespace ContentRepo.Editor
                 .ToList();
             return tracked
                 .Where(path => !onDisk.Contains(path, StringComparer.OrdinalIgnoreCase) && !File.Exists(Path.Combine(root, path)))
+                .ToList();
+        }
+
+        /// <summary>Schema files of the package whose deletion is already staged (for example by a restore).</summary>
+        private static async Task<List<string>> GetStagedGroupDeletionsAsync(string folder)
+        {
+            var main = new[] { $"{folder}.asset", $"{folder}.asset.meta" };
+            return SplitPaths(await RunGitCommandAsync(
+                    $"-c core.quotepath=off diff --cached --name-only --diff-filter=D -- {Quote(GroupsFolderName + "/")}", ContentAbsolutePath))
+                .Where(path => IsGroupFileOf(folder, Path.GetFileName(path)) && !main.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
                 .ToList();
         }
 

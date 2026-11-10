@@ -35,8 +35,47 @@ namespace ContentRepo.Editor
         public ContentCommit Merge;
         public int DroppedCount;
         public List<string> Examples = new();
+        internal string MergeId;
+        internal string Base;
+        internal List<string> Paths = new();
+        internal List<string> BothChanged = new();
         internal Dictionary<string, string> Kept = new(StringComparer.Ordinal);
         internal Dictionary<string, string> Expected = new(StringComparer.Ordinal);
+        internal Dictionary<string, string> Sources = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>A file a merge dropped: restoring it writes the version of <see cref="Source"/>, or deletes it.</summary>
+    public sealed class ContentLostFile
+    {
+        public string Path;
+        public bool Delete;
+        public bool RestoredLocally;
+        internal string Source;
+        internal string Blob;
+        internal string Kept;
+    }
+
+    /// <summary>A file the merge dropped that restoring leaves alone, and why.</summary>
+    public sealed class ContentSkippedFile
+    {
+        public string Path;
+        public string Reason;
+    }
+
+    /// <summary>Everything needed to show and restore what a merge dropped from a package.</summary>
+    public sealed class ContentLossDetails
+    {
+        public string Package;
+        public ContentCommit Merge;
+        public List<ContentLostFile> Files = new();
+        public List<string> ChangedOnBothSides = new();
+        public List<ContentSkippedFile> Skipped = new();
+        public List<ContentCommit> DroppedCommits = new();
+        public bool ContainsMerge;
+        internal string MergeId;
+
+        public int RestoredLocallyCount => Files.Count(file => file.RestoredLocally);
+        public int PendingCount => Files.Count(file => !file.RestoredLocally);
     }
 
     public sealed class ContentDeployStatus
@@ -226,7 +265,7 @@ namespace ContentRepo.Editor
                     var dropped = await MergeLossAsync(ids[0], ids[1], ids[2], package);
                     if (dropped == null) continue;
 
-                    var paths = dropped.Kept.Keys
+                    var paths = dropped.Paths
                         .Where(path => !(lostVersions.TryGetValue(path, out var lost) && lost.Contains(dropped.Expected[path] ?? "")))
                         .ToList();
                     foreach (var path in paths)
@@ -242,11 +281,25 @@ namespace ContentRepo.Editor
                 {
                     current ??= await PackageEntriesAsync(toCommit, package);
                     var (dropped, paths) = flagged[i];
-                    var missing = paths
-                        .Where(path => current.TryGetValue(path, out var now) ? now == dropped.Kept[path] : dropped.Kept[path] == null)
-                        .ToList();
+                    bool StillAsMerged(string path, string kept) => current.TryGetValue(path, out var now) ? now == kept : kept == null;
+                    var missing = paths.Where(path => StillAsMerged(path, dropped.Kept[path])).ToList();
                     if (missing.Count > 0)
-                        loss = new ContentMergeLoss { Merge = dropped.Merge, DroppedCount = missing.Count, Examples = PickExamples(missing) };
+                    {
+                        loss = new ContentMergeLoss
+                        {
+                            Merge = dropped.Merge, DroppedCount = missing.Count, Examples = PickExamples(missing),
+                            MergeId = dropped.MergeId, Base = dropped.Base, Paths = missing,
+                            BothChanged = dropped.BothChanged.Where(path => StillAsMerged(path, dropped.Kept.TryGetValue(path, out var kept) ? kept : null)).ToList(),
+                        };
+                        foreach (var path in missing)
+                        {
+                            loss.Kept[path] = dropped.Kept[path];
+                            loss.Expected[path] = dropped.Expected[path];
+                            loss.Sources[path] = dropped.Sources[path];
+                        }
+                        foreach (var path in loss.BothChanged)
+                            if (dropped.Kept.TryGetValue(path, out var kept)) loss.Kept[path] = kept;
+                    }
                 }
             }
             catch (Exception ex)
@@ -418,6 +471,116 @@ namespace ContentRepo.Editor
             }
         }
 
+        /// <summary>
+        /// The files the newest unrepaired merge dropped from the package, where each correct version lives, the
+        /// commits whose work was dropped, and which of the files this clone already has in its restored state.
+        /// </summary>
+        public static async Task<ContentLossDetails> GetLossDetailsAsync(string package) =>
+            await GetLossDetailsAsync(package, await ResolveRemoteAsync());
+
+        internal static async Task<ContentLossDetails> GetLossDetailsAsync(string package, string remote)
+        {
+            var loss = remote == null ? null : await FindUnrepairedLossAsync(package, remote);
+            if (loss == null || loss.MergeId == null) return null;
+
+            var details = new ContentLossDetails { Package = package, Merge = loss.Merge, MergeId = loss.MergeId, ChangedOnBothSides = loss.BothChanged.ToList() };
+            foreach (var path in loss.Paths)
+                details.Files.Add(new ContentLostFile
+                {
+                    Path = path,
+                    Delete = loss.Expected[path] == null,
+                    Source = loss.Sources[path],
+                    Blob = loss.Expected[path],
+                    Kept = loss.Kept[path],
+                });
+            await PairMetaFilesAsync(details, package, remote);
+            details.Files.Sort((a, b) => string.CompareOrdinal(a.Path, b.Path));
+
+            var root = ContentGitApi.ContentAbsolutePath;
+            details.ContainsMerge = (await ContentGitApi.RunGitAsync($"merge-base --is-ancestor {loss.MergeId} HEAD", root)).ExitCode == 0;
+            if (details.ContainsMerge)
+            {
+                var staged = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var batch in Batches(details.Files.Select(file => file.Path), 100))
+                    foreach (var line in SplitLines(await Git($"-c core.quotepath=off ls-files -s -- {string.Join(" ", batch.Select(Literal))}")))
+                    {
+                        var tab = line.IndexOf('\t');
+                        var fields = tab < 0 ? null : line.Substring(0, tab).Split(' ');
+                        if (fields != null && fields.Length >= 3) staged[line.Substring(tab + 1).Trim()] = fields[1];
+                    }
+                var head = await PackageEntriesAsync(await ResolveCommitAsync("HEAD"), package);
+                foreach (var file in details.Files.ToList())
+                {
+                    var present = staged.TryGetValue(file.Path, out var blob);
+                    file.RestoredLocally = file.Delete
+                        ? !present && !File.Exists(Path.Combine(root, file.Path))
+                        : present && blob == file.Blob;
+                    if (file.RestoredLocally) continue;
+
+                    head.TryGetValue(file.Path, out var committed);
+                    if (committed == file.Kept || committed == file.Blob) continue;
+                    details.Files.Remove(file);
+                    details.Skipped.Add(new ContentSkippedFile { Path = file.Path, Reason = "changed by a local commit that is not pushed yet" });
+                }
+            }
+            KeepFolderMetas(details);
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var source in details.Files.Select(file => file.Source).Distinct())
+            {
+                var output = await Git($"-c core.quotepath=off log --no-merges --format=%h%x09%ad%x09%an%x09%s --date=short {loss.Base}..{source} -- {await PathSpecAsync(package, loss.Base, source)}");
+                foreach (var commit in SplitLines(output).Select(ParseCommit).Where(commit => commit != null && seen.Add(commit.Sha)))
+                    details.DroppedCommits.Add(commit);
+            }
+            return details;
+        }
+
+        /// <summary>
+        /// Keeps assets and their .meta files together: restoring an asset without its .meta would make Unity create a
+        /// new one with a new GUID, and deleting one without the other leaves an orphan. Adds the companion with the same
+        /// source commit when the remote's version differs from the source's.
+        /// </summary>
+        private static async Task PairMetaFilesAsync(ContentLossDetails details, string package, string remote)
+        {
+            var planned = new HashSet<string>(details.Files.Select(file => file.Path), StringComparer.Ordinal);
+            var current = await PackageEntriesAsync(remote, package);
+            foreach (var file in details.Files.ToList())
+            {
+                var companion = file.Path.EndsWith(".meta", StringComparison.Ordinal) ? file.Path.Substring(0, file.Path.Length - 5) : file.Path + ".meta";
+                if (planned.Contains(companion)) continue;
+                var source = await PackageEntriesAsync(file.Source, package);
+                source.TryGetValue(companion, out var wanted);
+                current.TryGetValue(companion, out var now);
+                if (wanted == now) continue;
+                details.Files.Add(new ContentLostFile { Path = companion, Delete = wanted == null, Source = file.Source, Blob = wanted, Kept = now });
+                planned.Add(companion);
+            }
+        }
+
+        /// <summary>
+        /// A folder's .meta must not be deleted while the folder still has files after the restore: Unity would create a
+        /// new one with a new GUID.
+        /// </summary>
+        private static void KeepFolderMetas(ContentLossDetails details)
+        {
+            var root = ContentGitApi.ContentAbsolutePath;
+            var deleted = new HashSet<string>(details.Files.Where(file => file.Delete).Select(file => file.Path), StringComparer.Ordinal);
+            var restored = details.Files.Where(file => !file.Delete).Select(file => file.Path).ToList();
+            foreach (var file in details.Files.Where(file => file.Delete && file.Path.EndsWith(".meta", StringComparison.Ordinal)).ToList())
+            {
+                var folder = file.Path.Substring(0, file.Path.Length - 5);
+                var directory = Path.Combine(root, folder);
+                if (!Directory.Exists(directory) && !restored.Any(path => path.StartsWith(folder + "/", StringComparison.Ordinal))) continue;
+                var remaining = Directory.Exists(directory)
+                    && Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+                        .Select(path => path.Substring(root.Length + 1).Replace('\\', '/'))
+                        .Any(path => !deleted.Contains(path));
+                if (!remaining && !restored.Any(path => path.StartsWith(folder + "/", StringComparison.Ordinal))) continue;
+                details.Files.Remove(file);
+                details.Skipped.Add(new ContentSkippedFile { Path = file.Path, Reason = "the folder still has files, so its .meta stays" });
+            }
+        }
+
         public static string DescribeLoss(ContentMergeLoss loss)
         {
             var text = new StringBuilder($"Merge {loss.Merge}\nleft out changes to this package that a normal merge of its parents keeps. " +
@@ -514,7 +677,19 @@ namespace ContentRepo.Editor
                 excluded.Add(path.EndsWith(".meta", StringComparison.Ordinal) ? path.Substring(0, path.Length - 5) : path + ".meta");
             }
 
-            var keptBlobs = new HashSet<string>(actual.Values, StringComparer.Ordinal);
+            var bothChanged = paths
+                .Where(path => Blob(ours, path) != Blob(ancestor, path) && Blob(theirs, path) != Blob(ancestor, path) && Blob(ours, path) != Blob(theirs, path))
+                .Where(path => Blob(actual, path) == Blob(ours, path) || Blob(actual, path) == Blob(theirs, path))
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToList();
+
+            // Contents the merge itself placed somewhere new (neither parent nor the base had them at that path), for
+            // example a file moved along with a renamed folder. A dropped add whose content is found there was kept
+            // under another path. Contents that merely stayed where they were do not count: that is how a move by one
+            // parent looks when the merge keeps the other parent.
+            var keptBlobs = new HashSet<string>(actual
+                .Where(entry => entry.Value != Blob(ancestor, entry.Key) && entry.Value != Blob(ours, entry.Key) && entry.Value != Blob(theirs, entry.Key))
+                .Select(entry => entry.Value), StringComparer.Ordinal);
             var dropped = paths
                 .Where(path => !excluded.Contains(path))
                 .Where(path =>
@@ -538,16 +713,39 @@ namespace ContentRepo.Editor
                             ?? new ContentCommit { Sha = merge.Substring(0, 7) },
                     DroppedCount = dropped.Count,
                     Examples = PickExamples(dropped),
+                    MergeId = merge,
+                    Base = bases[0],
+                    Paths = dropped,
+                    BothChanged = bothChanged,
                 };
                 foreach (var path in dropped)
                 {
+                    var oursChanged = Blob(ours, path) != Blob(ancestor, path);
                     loss.Kept[path] = Blob(actual, path);
-                    loss.Expected[path] = Blob(ours, path) == Blob(ancestor, path) ? Blob(theirs, path) : Blob(ours, path);
+                    loss.Expected[path] = oursChanged ? Blob(ours, path) : Blob(theirs, path);
+                    loss.Sources[path] = oursChanged ? left : right;
                 }
+                foreach (var path in bothChanged)
+                    loss.Kept[path] = Blob(actual, path);
             }
             MergeLosses[key] = loss;
             return loss;
         }
+
+        internal static IEnumerable<List<string>> Batches(IEnumerable<string> items, int size)
+        {
+            var batch = new List<string>(size);
+            foreach (var item in items)
+            {
+                batch.Add(item);
+                if (batch.Count < size) continue;
+                yield return batch;
+                batch = new List<string>(size);
+            }
+            if (batch.Count > 0) yield return batch;
+        }
+
+        internal static string Literal(string path) => Quote(":(literal)" + path);
 
         private static List<string> PickExamples(List<string> paths) => paths
             .OrderBy(path => path.EndsWith(".meta", StringComparison.Ordinal) ? 1 : 0)
@@ -688,7 +886,6 @@ namespace ContentRepo.Editor
         private static List<string> SplitLines(string output) =>
             output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).ToList();
 
-        private static string Literal(string path) => Quote(":(literal)" + path);
 
         private static string Quote(string value) => "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 

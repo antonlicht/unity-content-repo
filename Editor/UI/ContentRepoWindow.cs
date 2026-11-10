@@ -735,6 +735,11 @@ namespace ContentRepo.Editor
             moreBtn.clicked += () =>
             {
                 var menu = new GenericMenu();
+                if (packageSync.TryGetValue(pkg, out var lostSync) && lostSync.Loss != null)
+                {
+                    menu.AddItem(new GUIContent("Lost changes…"), false, () => _ = ShowLostChangesAsync(pkg));
+                    menu.AddSeparator("");
+                }
                 if (repoFolders.Contains(pkg))
                     menu.AddItem(new GUIContent("Rename"), false, () => EnterRenameMode());
                 if (prdId != null && prdId != stgId)
@@ -1008,6 +1013,11 @@ namespace ContentRepo.Editor
             {
                 var dirty = isCheckedOut && !latestStatus.IsClean;
                 var menu  = new GenericMenu();
+                if (packageSync.TryGetValue(folder, out var lostSync) && lostSync.Loss != null)
+                {
+                    menu.AddItem(new GUIContent("Lost changes…"), false, () => _ = ShowLostChangesAsync(folder));
+                    menu.AddSeparator("");
+                }
                 menu.AddItem(new GUIContent("Rename Package"), false, () => EnterRenameMode());
                 if (dirty && isOnRemote)
                 {
@@ -1176,8 +1186,18 @@ namespace ContentRepo.Editor
         {
             packageSync.TryGetValue(package, out var sync);
             if (sync?.Loss != null)
-                group.Add(MakeIconBadge("repo lost changes", "triangle-alert", "cs-badge--sync-error",
-                    ContentSyncApi.DescribeLoss(sync.Loss) + "\nA build made from the repository lacks that work. Restore it before you build, upload or promote."));
+            {
+                var lost = MakeIconBadge("repo lost changes", "triangle-alert", "cs-badge--sync-error",
+                    ContentSyncApi.DescribeLoss(sync.Loss) + "\nA build made from the repository lacks that work.\n\nClick to see all files and restore them.");
+                lost.AddToClassList("cs-badge--clickable");
+                lost.RegisterCallback<ClickEvent>(evt =>
+                {
+                    if (evt.button != 0) return;
+                    evt.StopPropagation();
+                    _ = ShowLostChangesAsync(package);
+                });
+                group.Add(lost);
+            }
             if (sync != null && sync.Unpulled.Count > 0)
                 group.Add(MakeBadge($"{sync.Unpulled.Count} to pull", "cs-badge--sync-warn",
                     "Commits on the remote that are not pulled yet:\n  " + string.Join("\n  ", sync.Unpulled.Take(8)) +
@@ -1247,6 +1267,42 @@ namespace ContentRepo.Editor
                 badge.Add(image);
             }
             return badge;
+        }
+
+        private async System.Threading.Tasks.Task ShowLostChangesAsync(string package)
+        {
+            if (busy) return;
+            ContentLossDetails details = null;
+            SetBusy(true, $"Collecting the lost changes of '{package}'…");
+            try { details = await ContentSyncApi.GetLossDetailsAsync(package); }
+            catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); return; }
+            finally { SetBusy(false); }
+
+            if (details == null)
+            {
+                SetStatus($"'{package}' has no lost changes on {ContentSyncApi.RemoteRef} any more.");
+                _ = RunAsync("Refreshing…", () => System.Threading.Tasks.Task.CompletedTask);
+                return;
+            }
+            SetStatus("Ready");
+            var checkedOut = checkedOutFolders.Any(f => f.Equals(package, StringComparison.OrdinalIgnoreCase));
+            var unpulled = checkedOut ? (await ContentSyncApi.GetUnpulledCommitsAsync(package)).Count : 0;
+            LostChangesWindow.Show(details, checkedOut, unpulled, confirmed =>
+            {
+                if (busy) return false;
+                _ = RunAsync($"Restoring the lost changes of '{package}'…", async () =>
+                {
+                    // Work from the repository as it is now, not as it was when the window opened.
+                    var current = await ContentSyncApi.GetLossDetailsAsync(package)
+                        ?? throw new InvalidOperationException($"'{package}' has no lost changes on {ContentSyncApi.RemoteRef} any more. Nothing was restored.");
+                    if (current.PendingCount != confirmed.PendingCount || current.MergeId != confirmed.MergeId)
+                        throw new InvalidOperationException("The lost changes changed since the window opened. Nothing was restored; open Lost changes again.");
+                    var restored = await ContentGitApi.RestoreLostChangesAsync(current);
+                    AppendDeployLog($"[Restore] '{package}': {restored} file(s) restored from what merge {current.Merge?.Sha} dropped. " +
+                                    "Check them, then commit and push. The red badge clears once the push reaches the remote.");
+                });
+                return true;
+            });
         }
 
         private static VisualElement MakeIconBadge(string text, string icon, string stateClass, string tooltip)

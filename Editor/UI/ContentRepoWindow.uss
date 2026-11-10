@@ -481,6 +481,15 @@
     color: rgb(255, 190, 185);
 }
 
+.cs-badge--clickable {
+    cursor: link;
+}
+
+.cs-badge--clickable:hover {
+    border-width: 1px;
+    border-color: rgba(255, 190, 185, 0.7);
+}
+
 .cs-badge--sync-error .cs-deploy-badge-icon {
     --unity-image-tint-color: rgb(255, 190, 185);
 }
