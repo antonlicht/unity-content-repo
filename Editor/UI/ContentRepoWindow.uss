@@ -89,20 +89,26 @@
 
 .cs-folder-name {
     min-width: 120px;
+    flex-shrink: 0;
     font-size: 12px;
     -unity-font-style: bold;
 }
 
 .cs-badge-group {
     flex-direction: row;
+    flex-wrap: wrap;
+    flex-shrink: 1;
     align-items: center;
     margin-left: 8px;
 }
 
 .cs-badge {
+    flex-shrink: 0;
     padding: 1px 6px;
     border-radius: 3px;
     font-size: 10px;
+    margin-top: 1px;
+    margin-bottom: 1px;
     margin-right: 3px;
     -unity-text-align: middle-center;
 }
@@ -348,6 +354,7 @@
 
 .cs-pipeline-name {
     min-width: 160px;
+    flex-shrink: 0;
     -unity-font-style: bold;
 }
 

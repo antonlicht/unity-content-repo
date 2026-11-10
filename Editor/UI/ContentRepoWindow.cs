@@ -610,7 +610,10 @@ namespace ContentRepo.Editor
 
             var promoteReady = stgId != null && stgId != prdId;
 
-            AddSyncBadges(row, pkg, stgId, prdId);
+            var badges = new VisualElement();
+            badges.AddToClassList("cs-badge-group");
+            AddSyncBadges(badges, pkg, stgId, prdId);
+            row.Add(badges);
 
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
