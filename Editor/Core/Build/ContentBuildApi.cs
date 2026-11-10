@@ -413,29 +413,22 @@ namespace ContentRepo.Editor
             return results;
         }
 
-        public static void BuildContentPackageCLI()
+        public static void BuildContentPackageCLI() => ContentCli.Run("Build CLI", async () =>
         {
-            try
-            {
-                var args = ParseCommandLine();
-                if (!args.TryGetValue("contentPackage", out var pkg))
-                    throw new InvalidOperationException("Missing -contentPackage <name>");
+            var args = ParseCommandLine();
+            if (!args.TryGetValue("contentPackage", out var pkg))
+                throw new InvalidOperationException("Missing -contentPackage <name>");
 
-                BuildContentPackageAsync(pkg, Debug.Log).GetAwaiter().GetResult();
-                EditorApplication.Exit(0);
-            }
-            catch (Exception ex) { Debug.LogError($"[Build CLI] {ex}"); EditorApplication.Exit(1); }
-        }
+            await BuildContentPackageAsync(pkg, Debug.Log);
+            return true;
+        });
 
-        public static void BuildAllCLI()
+        public static void BuildAllCLI() => ContentCli.Run("Build CLI", async () =>
         {
-            try
-            {
-                var results = BuildAllCheckedOutAsync(Debug.Log).GetAwaiter().GetResult();
-                EditorApplication.Exit(results.All(r => r.Success) ? 0 : 1);
-            }
-            catch (Exception ex) { Debug.LogError($"[Build CLI] {ex}"); EditorApplication.Exit(1); }
-        }
+            await ContentCli.RequireCheckedOutPackagesAsync();
+            var results = await BuildAllCheckedOutAsync(Debug.Log);
+            return results.All(r => r.Success);
+        });
 
         // Rewrites placeholder URLs in catalog JSON files and updates companion .hash files.
         // Operates on files in targetDir (a temp copy, not the original artifact).

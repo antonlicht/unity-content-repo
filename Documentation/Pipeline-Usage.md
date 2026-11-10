@@ -154,11 +154,13 @@ For full API reference and internals see [Local-Dev-Overrides.md](Local-Dev-Over
 ## CI invocation
 
 The build and upload APIs expose static CLI entry points callable from `Unity -batchmode -executeMethod`.
+Do not pass `-quit`: each entry point returns right away, keeps Unity running until its work is done
+and then exits Unity itself. With `-quit` the command refuses to run and exits with `1`.
 
 ### Build a single package
 
 ```bash
-Unity -batchmode -nographics -quit \
+Unity -batchmode -nographics \
   -projectPath /path/to/UnityProject \
   -executeMethod ContentRepo.Editor.ContentBuildApi.BuildContentPackageCLI \
   -contentPackage Episode01
@@ -167,7 +169,7 @@ Unity -batchmode -nographics -quit \
 ### Build all checked-out packages
 
 ```bash
-Unity -batchmode -nographics -quit \
+Unity -batchmode -nographics \
   -projectPath /path/to/UnityProject \
   -executeMethod ContentRepo.Editor.ContentBuildApi.BuildAllCLI
 ```
@@ -175,7 +177,7 @@ Unity -batchmode -nographics -quit \
 ### Upload a single package to staging
 
 ```bash
-Unity -batchmode -nographics -quit \
+Unity -batchmode -nographics \
   -projectPath /path/to/UnityProject \
   -executeMethod ContentRepo.Editor.ContentUploadApi.UploadContentPackageCLI \
   -contentPackage Episode01 \
@@ -185,17 +187,21 @@ Unity -batchmode -nographics -quit \
 ### Upload all to staging
 
 ```bash
-Unity -batchmode -nographics -quit \
+Unity -batchmode -nographics \
   -projectPath /path/to/UnityProject \
   -executeMethod ContentRepo.Editor.ContentUploadApi.UploadAllCLI \
   -environment staging
 ```
 
-`UploadAllCLI` also republishes the staging manifest. `-environment` is optional and defaults to the
-configured staging prefix. There is also a `ContentRepo.Editor.ContentUploadApi.RunCleanupCLI`
+`UploadAllCLI` writes each uploaded package's entry to the target environment's manifest (staging by default) as it goes.
+`-environment` is optional and defaults to the configured staging prefix. There is also a `ContentRepo.Editor.ContentUploadApi.RunCleanupCLI`
 entry point (optional `-generation`) that runs the retention cleanup that the scheduled Lambda runs.
 
-The process exits `0` on success and `1` on failure.
+The process exits `0` on success and `1` on failure. `BuildAllCLI` and `UploadAllCLI` exit `1` when any
+package failed (the other packages are still processed), and also when the content repository is missing,
+is not a sparse checkout, or has no package checked out. `RunCleanupCLI` exits `1` when any deletion
+failed; failed builds stay scheduled for the next run. Re-deploying an unchanged cleanup stack with
+`ContentRepo.Editor.ContentInfraApi.DeployCleanupLambdaCLI` counts as success. Add `-logFile <path>` to keep the build log.
 
 ---
 

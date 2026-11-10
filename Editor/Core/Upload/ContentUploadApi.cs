@@ -366,6 +366,11 @@ namespace ContentRepo.Editor
                 entries.Add(entry);
             }
 
+            if (entries.Count == 0)
+            {
+                log?.Invoke("[Manifest] Nothing to publish: no package was built in this session.");
+                return;
+            }
             await ContentManifestApi.PublishAsync(environment, generation, entries, provider, log);
         }
 
@@ -422,55 +427,45 @@ namespace ContentRepo.Editor
 
         // ── CLI entry points ──────────────────────────────────────────────────────
 
-        public static void UploadContentPackageCLI()
+        public static void UploadContentPackageCLI() => ContentCli.Run("Upload CLI", async () =>
         {
-            try
-            {
-                var args = ParseCommandLine();
-                if (!args.TryGetValue("contentPackage", out var pkg))
-                    throw new InvalidOperationException("Missing -contentPackage <name>");
-                if (!args.TryGetValue("environment", out var env))
-                    env = ContentUploadSettings.instance.StagingPrefix;
+            var args = ParseCommandLine();
+            if (!args.TryGetValue("contentPackage", out var pkg))
+                throw new InvalidOperationException("Missing -contentPackage <name>");
+            if (!args.TryGetValue("environment", out var env))
+                env = ContentUploadSettings.instance.StagingPrefix;
 
-                UploadContentPackageAsync(pkg, env, log: Debug.Log).GetAwaiter().GetResult();
-                EditorApplication.Exit(0);
-            }
-            catch (Exception ex) { Debug.LogError($"[Upload CLI] {ex}"); EditorApplication.Exit(1); }
-        }
+            await UploadContentPackageAsync(pkg, env, log: Debug.Log);
+            return true;
+        });
 
-        public static void UploadAllCLI()
+        public static void UploadAllCLI() => ContentCli.Run("Upload CLI", async () =>
         {
-            try
-            {
-                var args = ParseCommandLine();
-                if (!args.TryGetValue("environment", out var env))
-                    env = ContentUploadSettings.instance.StagingPrefix;
+            var args = ParseCommandLine();
+            if (!args.TryGetValue("environment", out var env))
+                env = ContentUploadSettings.instance.StagingPrefix;
 
-                UploadAllCheckedOutAsync(env, Debug.Log).GetAwaiter().GetResult();
-                PublishManifestAsync(env, Debug.Log).GetAwaiter().GetResult();
-                EditorApplication.Exit(0);
-            }
-            catch (Exception ex) { Debug.LogError($"[Upload CLI] {ex}"); EditorApplication.Exit(1); }
-        }
+            await ContentCli.RequireCheckedOutPackagesAsync();
+            var results = await UploadAllCheckedOutAsync(env, Debug.Log);
+            await PublishManifestAsync(env, Debug.Log);
+            return results.All(r => r.Success);
+        });
 
-        public static void RunCleanupCLI()
+        public static void RunCleanupCLI() => ContentCli.Run("Cleanup CLI", async () =>
         {
-            try
-            {
-                var args = ParseCommandLine();
-                var generation = args.TryGetValue("generation", out var g) ? g
-                    : ContentRepoGenerationSettings.instance.Generation;
+            var args = ParseCommandLine();
+            var generation = args.TryGetValue("generation", out var g) ? g
+                : ContentRepoGenerationSettings.instance.Generation;
 
-                RunCleanupAsync(generation, Debug.Log).GetAwaiter().GetResult();
-                EditorApplication.Exit(0);
-            }
-            catch (Exception ex) { Debug.LogError($"[Cleanup CLI] {ex}"); EditorApplication.Exit(1); }
-        }
+            return await RunCleanupAsync(generation, Debug.Log) == 0;
+        });
 
         // ── Cleanup (same logic as the Lambda, runnable from editor too) ──────────
 
-        public static async Task RunCleanupAsync(string generation, UploadLogHandler log = null)
+        /// <summary>Deletes the builds whose retention ran out. Returns how many deletions failed (they stay scheduled).</summary>
+        public static async Task<int> RunCleanupAsync(string generation, UploadLogHandler log = null)
         {
+            var failed = 0;
             var provider = ContentUploadProviderFactory.Resolve();
             var schedule = await GetDeleteScheduleAsync(generation, provider);
             var due = schedule.DueEntries();
@@ -500,11 +495,13 @@ namespace ContentRepo.Editor
                 }
                 catch (Exception ex)
                 {
+                    failed++;
                     log?.Invoke($"[Cleanup] FAILED deleting {prefix}: {ex.Message}");
                 }
             }
 
             await SaveDeleteScheduleAsync(generation, schedule, provider, log);
+            return failed;
         }
 
         // ── Timestamps ────────────────────────────────────────────────────────────
@@ -573,17 +570,25 @@ namespace ContentRepo.Editor
                     var psi = new System.Diagnostics.ProcessStartInfo
                     {
                         FileName = "aws",
-                        Arguments = $"s3 rm \"{s3Uri}\" --recursive --region {settings.S3Region}",
+                        Arguments = $"s3 rm \"{s3Uri}\" --recursive --only-show-errors --region {settings.S3Region}",
                         UseShellExecute = false, CreateNoWindow = true,
                         RedirectStandardOutput = true, RedirectStandardError = true,
                     };
                     var cmd = $"aws {psi.Arguments}";
                     Debug.Log($"[ContentRepo] > {cmd}");
                     log?.Invoke($"> {cmd}");
-                    var p = System.Diagnostics.Process.Start(psi)!;
+
+                    // Both streams are read while aws runs: a redirected stream that nobody reads fills its pipe
+                    // once there is enough output, and aws then blocks forever.
+                    var errors = new System.Text.StringBuilder();
+                    using var p = System.Diagnostics.Process.Start(psi)!;
+                    p.OutputDataReceived += (_, e) => { };
+                    p.ErrorDataReceived += (_, e) => { if (e.Data != null) errors.AppendLine(e.Data); };
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
                     p.WaitForExit();
                     if (p.ExitCode != 0)
-                        throw new InvalidOperationException($"aws rm failed (exit {p.ExitCode})");
+                        throw new InvalidOperationException($"aws rm failed (exit {p.ExitCode}): {errors.ToString().Trim()}");
                 });
             }
             else

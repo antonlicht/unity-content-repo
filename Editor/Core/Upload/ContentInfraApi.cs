@@ -33,6 +33,7 @@ namespace ContentRepo.Editor
                        $" --stack-name {StackName}" +
                        $" --parameter-overrides BucketName={settings.S3BucketName} Region={settings.S3Region}" +
                        $" --capabilities CAPABILITY_NAMED_IAM" +
+                       $" --no-fail-on-empty-changeset" +
                        $" --region {settings.S3Region}";
 
             log?.Invoke("[Infra] Deploying cleanup Lambda stack…");
@@ -67,15 +68,11 @@ namespace ContentRepo.Editor
 
         // ── CLI ───────────────────────────────────────────────────────────────────
 
-        public static void DeployCleanupLambdaCLI()
+        public static void DeployCleanupLambdaCLI() => ContentCli.Run("Infra CLI", async () =>
         {
-            try
-            {
-                DeployCleanupLambdaAsync(UnityEngine.Debug.Log).GetAwaiter().GetResult();
-                UnityEditor.EditorApplication.Exit(0);
-            }
-            catch (Exception ex) { UnityEngine.Debug.LogError($"[Infra CLI] {ex}"); UnityEditor.EditorApplication.Exit(1); }
-        }
+            await DeployCleanupLambdaAsync(UnityEngine.Debug.Log);
+            return true;
+        });
 
         public static async Task ConfigureCredentialsAsync(string accessKeyId, string secretAccessKey, string region)
         {
