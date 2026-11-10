@@ -33,11 +33,25 @@ builds bundles + a remote catalog. Artifacts land in
 
 Click **Build all** in the toolbar. Packages build sequentially; failures are logged but don't abort the rest.
 
+Before building, the window fetches and warns when a package has commits on the remote that you have not
+pulled, when a recent merge dropped changes to it, or when the fetch failed. Building is refused while
+the content repository is in the middle of a merge, rebase, cherry-pick, revert or `git am`, or has
+unresolved conflicts.
+
+Every build writes `gitSha` (the commit it was built from), `sourceTree` (a fingerprint of the package
+folder and its `_groups` files as they would be committed), `sourceDirty` (built from uncommitted files,
+or the fingerprint failed) and `builtAt` into `build-metadata.json`. Upload copies them into the
+manifest's platform entry as `sourceSha`, `sourceTree`, `sourceDirty` and `builtAt`, and Promote
+carries them to production. Game clients ignore these fields.
+
 ---
 
 ## Uploading to staging
 
 Click **Upload** on a package row. Bundles are pushed to S3 and the staging manifest entry is updated.
+Upload publishes the newest build for the active build target. It also appears when a later rebuild has
+the same bundles as staging but a different, clean source fingerprint, so staging can show that it
+matches the repository.
 
 Click **Upload all** to do this for every checked-out package (this also republishes the staging manifest).
 
@@ -51,6 +65,11 @@ When a package's staging build differs from production, a **Promote** button app
 - Click **Promote all** in the toolbar to promote every checked-out package at once.
 
 Promotion only rewrites the production manifest to point at the staging build — no files move.
+
+Promote fetches first and warns, listing the reasons, when a staging build that would go live does not
+match the content repository (checked for every platform in the entry), when a recent merge dropped
+changes to the package, or when the fetch failed. **Promote all** checks every checked-out package it
+will promote.
 
 ## Full pipeline in one action
 
@@ -69,10 +88,16 @@ Each package row shows small badges:
 | `not checked out` | On the remote but not checked out locally |
 | `clean` | No local git changes |
 | `+K` / `M` / `-D` | K untracked / M modified+staged / D deleted files |
+| `N to pull` | N commits on the remote touch this package and are not pulled yet |
+| `repo lost changes` | A recent merge dropped changes to this package that are still missing on the remote |
 | `staging: a1b2c3d4` | Build ID live on staging (first 8 chars) |
 | `production: a1b2c3d4` | Build ID live on production (first 8 chars) |
 
-When staging is ahead of production, the **Promote** button (and the toolbar **Promote all**) becomes
+The staging and production badges also show whether that build matches the content repository (check
+mark, `N behind`, `not in repo`, `removed`, `repo lost changes`, `unverified`). The full table is in the
+[README](../README.md#daily-workflow). Hover a badge for the details.
+
+When staging differs from production, the **Promote** button (and the toolbar **Promote all**) becomes
 visible for that package.
 
 ---

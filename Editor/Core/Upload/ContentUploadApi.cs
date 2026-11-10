@@ -527,40 +527,13 @@ namespace ContentRepo.Editor
             if (!string.IsNullOrEmpty(buildId) && !string.IsNullOrEmpty(platform))
                 return ContentBuildApi.GetArtifactPath(pkg, buildId, platform);
 
-            var last = ContentBuildApi.GetLastBuildResult(pkg);
-            if (last != null)
-            {
-                buildId = last.BuildId;
-                platform = last.Platform;
-                return last.ArtifactPath;
-            }
-
-            // Scan build output root for the newest metadata file for this package.
-            var root = ContentBuildSettings.instance.BuildOutputRoot;
-            var absRoot = Path.IsPathRooted(root) ? root : Path.Combine(ContentGitApi.ProjectRoot, root);
-            var buildsRoot = Path.Combine(absRoot, "builds");
-            if (!Directory.Exists(buildsRoot))
-                throw new DirectoryNotFoundException(
-                    $"No builds found for '{pkg}'. Build the content package first.");
-
-            BuildMetadata newest = null;
-            string newestPath = null;
-            foreach (var meta in Directory.GetFiles(buildsRoot, "build-metadata.json", SearchOption.AllDirectories)
-                         .Select(f => (path: Path.GetDirectoryName(f), meta: BuildMetadata.FromJson(File.ReadAllText(f))))
-                         .Where(t => t.meta?.contentPackage == pkg)
-                         .OrderByDescending(t => t.meta.builtAt))
-            {
-                newest = meta.meta;
-                newestPath = meta.path;
-                break;
-            }
-
-            if (newest == null)
-                throw new DirectoryNotFoundException($"No build artifacts found for '{pkg}'. Build the content package first.");
-
-            buildId = newest.buildId;
-            platform = newest.platform;
-            return newestPath;
+            // The same build the Content Browser offers for upload: this session's last build for the active build
+            // target, otherwise the newest build of that target on disk.
+            if (string.IsNullOrEmpty(platform)) platform = EditorUserBuildSettings.activeBuildTarget.ToString();
+            var latest = ContentBuildApi.GetLatestBuild(pkg, platform)
+                ?? throw new DirectoryNotFoundException($"No {platform} build found for '{pkg}'. Build the content package first.");
+            buildId = latest.buildId;
+            return ContentBuildApi.GetArtifactPath(pkg, buildId, platform);
         }
 
         private static async Task<DeleteSchedule> GetDeleteScheduleAsync(string generation, IContentUploadProvider provider)

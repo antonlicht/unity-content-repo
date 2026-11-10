@@ -81,6 +81,7 @@ Status badges per row:
 | `M` | M modified/staged files |
 | `-D` | D deleted files |
 | `N to pull` | N commits on the remote touch this package and are not pulled yet |
+| `repo lost changes` (red) | A recent merge on the remote dropped changes to this package that are still missing there (see below) |
 | `staging: <id>` | Build ID currently live on staging (first 8 chars) |
 | `production: <id>` | Build ID currently live on production (first 8 chars) |
 
@@ -90,21 +91,43 @@ package, checked out or not. Hover a badge for the build's source commit and the
 | Badge state | Meaning |
 |---|---|
 | check mark | The build was made from exactly the files that are in the repository |
-| `N behind` (amber) | N newer commits in the repository are not in the build: pull, build and upload |
-| `not in repo` (amber) | The build contains changes that were never committed or pushed |
-| `unverified` (amber) | The build's source commit is not on the remote, so it cannot be compared |
-| no mark | A build made before 0.5.0: no newer commits, but local changes in it cannot be ruled out |
+| `N behind` (amber) | N newer commits in the repository are not in the build: pull, build and upload (on production: bring staging up to date, then promote) |
+| `N behind` (no color change) | Production only: staging already matches the repository and waits to be promoted |
+| `not in repo` (amber) | The build contains changes that are not in the repository as built (not committed, not pushed, or committed with further edits) |
+| `removed` (amber) | The package was deleted or renamed in the repository: remove it from that environment |
+| `repo lost changes` (red) | A merge after this build's source dropped changes to this package that are still missing: rebuilding from the repository ships that loss (the build may still have the work) |
+| `unverified` (amber) | The build cannot be compared: its source commit is not on the remote, the branch is missing, or its fingerprint failed |
+| no mark | No newer commits, but the build has no fingerprint (made before 0.5.0, or an older tool rewrote the manifest), so local changes in it cannot be ruled out |
 
-Every build records a fingerprint of the files it was made from. A build made from uncommitted files
-turns into a check mark as soon as exactly those files are committed and pushed; no rebuild is needed.
+Every build records a fingerprint of the files it was made from: `gitSha`, `sourceTree`, `sourceDirty`
+and `builtAt` in `build-metadata.json`, copied as `sourceSha`, `sourceTree`, `sourceDirty` and `builtAt`
+into the manifest's platform entry (game clients ignore these fields). A build made from uncommitted
+files turns into a check mark as soon as exactly those files are committed and pushed; no rebuild or
+upload is needed. When a rebuild produces the same bundles with a later, clean fingerprint, **Upload**
+appears again so staging can carry it. Upgrade the whole team together: a pre-0.5 version of the tool
+that writes a manifest drops the fingerprints of every package in it.
 
-When staging is ahead of production, the per-row **Promote** button (and the toolbar **Promote all**)
-becomes visible. Promote warns and lists the missing commits when staging does not match the
-repository, and Build warns when the package has commits on the remote that are not pulled yet.
+**Merges that drop changes.** For the last 10 merge commits that touch a package, the window compares
+the merge with its parents and their merge base. A file counts as dropped when only one parent changed
+it (so a normal merge takes that change without a conflict) and the merge kept the other parent's
+unchanged version, as long as the file is still in that state on the remote. Files both parents changed,
+their `.meta` companions, renames and edits made in the merge commit itself are not counted. Only
+commits and trees are read, so nothing is downloaded and every package can be checked, checked out or
+not.
 
-If a pull hits a conflict, git stays in the middle of a merge and the incoming changes of other people
-show up as local changes. The window then shows a banner with an **Abort** button, and commit, discard
-and the index repair are blocked until the merge is finished in a git client or aborted.
+When staging differs from production, the per-row **Promote** button (and the toolbar **Promote all**)
+becomes visible. Promote fetches first and warns, listing the reasons, when a staging build that would
+go live does not match the repository (for every platform in it), when the package has lost changes,
+or when the fetch failed. Build fetches and warns when the package has commits on the remote that are
+not pulled yet, when it has lost changes, or when the fetch failed.
+
+If a pull hits a conflict, git stays in the middle of a merge (or a rebase, cherry-pick, revert or
+`git am`) and changes that are not committed on this branch yet show up as local changes. The window
+then shows a banner that explains how to finish it, with an **Abort** button. Until it is finished in a
+git client or aborted, the window refuses to commit, discard, delete files, check out, disconnect,
+create, rename or delete packages, build, or run the index repair. The same applies while files have
+unresolved conflicts without an operation in progress (for example after `git stash pop`). Upload and
+Promote of existing builds still work.
 
 See **[Documentation/Pipeline-Usage.md](Documentation/Pipeline-Usage.md)** for the full build, upload,
 promote, and local-dev-override workflow.

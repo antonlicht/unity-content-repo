@@ -83,7 +83,13 @@ namespace ContentRepo.Editor
             try
             {
                 result = await BuildPackageAsync(contentPackageName, log);
-                await StampSourceAsync(result, log);
+                result.SourceDirty = true;
+                try { await StampSourceAsync(result, log); }
+                catch (Exception ex)
+                {
+                    log?.Invoke($"[Build] WARNING: could not record which files '{contentPackageName}' was built from ({ex.Message}). The build counts as made from local changes.");
+                    Debug.LogWarning($"[ContentRepo] Could not stamp the source of '{contentPackageName}': {ex.Message}");
+                }
                 return result;
             }
             catch (Exception ex)
@@ -457,7 +463,26 @@ namespace ContentRepo.Editor
             return Path.Combine(absRoot, "builds", buildId, platform, contentPackageName);
         }
 
-        public static string GetLatestBuildIdFromDisk(string contentPackageName, string platform)
+        public static string GetLatestBuildIdFromDisk(string contentPackageName, string platform) =>
+            GetLatestMetadataFromDisk(contentPackageName, platform)?.buildId;
+
+        /// <summary>
+        /// The build Upload would publish for this package and platform: this session's last build, otherwise the
+        /// newest build on disk (the same choice the upload makes).
+        /// </summary>
+        internal static BuildMetadata GetLatestBuild(string contentPackageName, string platform)
+        {
+            var last = GetLastBuildResult(contentPackageName);
+            if (last != null && last.Success && last.Platform == platform)
+                return ReadMetadata(last.ArtifactPath) ?? new BuildMetadata
+                {
+                    contentPackage = contentPackageName, platform = platform, buildId = last.BuildId, gitSha = last.GitSha,
+                    sourceTree = last.SourceTree, sourceDirty = last.SourceDirty,
+                };
+            return GetLatestMetadataFromDisk(contentPackageName, platform);
+        }
+
+        private static BuildMetadata GetLatestMetadataFromDisk(string contentPackageName, string platform)
         {
             var root    = ContentBuildSettings.instance.BuildOutputRoot;
             var absRoot = Path.IsPathRooted(root) ? root : Path.Combine(ContentGitApi.ProjectRoot, root);
@@ -468,7 +493,6 @@ namespace ContentRepo.Editor
                 .Select(d => ReadMetadata(Path.Combine(d, platform, contentPackageName)))
                 .Where(m => m != null)
                 .OrderByDescending(m => m.builtAt)
-                .Select(m => m.buildId)
                 .FirstOrDefault();
         }
 
@@ -695,6 +719,7 @@ namespace ContentRepo.Editor
                 gitSha = gitSha ?? "",
                 unityVersion = Application.unityVersion,
                 builtAt = DateTime.UtcNow.ToString("O"),
+                sourceDirty = true,
             };
             File.WriteAllText(Path.Combine(artifactPath, "build-metadata.json"), meta.ToJson());
         }

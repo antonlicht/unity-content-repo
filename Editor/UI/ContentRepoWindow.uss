@@ -476,6 +476,16 @@
     --unity-image-tint-color: rgb(255, 205, 110);
 }
 
+.cs-badge--sync-error {
+    background-color: rgba(205, 60, 60, 0.38);
+    color: rgb(255, 190, 185);
+}
+
+.cs-badge--sync-error .cs-deploy-badge-icon {
+    --unity-image-tint-color: rgb(255, 190, 185);
+}
+
+
 .cs-menu-btn {
     font-size: 18px;
     -unity-font-style: bold;
@@ -492,7 +502,8 @@
     opacity: 0.6;
 }
 
-.cs-pipeline-row--remote .cs-badge--sync-warn {
+.cs-pipeline-row--remote .cs-badge--sync-warn,
+.cs-pipeline-row--remote .cs-badge--sync-error {
     opacity: 1;
 }
 

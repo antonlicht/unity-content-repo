@@ -43,6 +43,20 @@ namespace ContentRepo.Editor
         }
     }
 
+    public readonly struct GitResult
+    {
+        public readonly int ExitCode;
+        public readonly string Output;
+        public readonly string Error;
+
+        public GitResult(int exitCode, string output, string error)
+        {
+            ExitCode = exitCode;
+            Output = output;
+            Error = error;
+        }
+    }
+
     public static class ContentGitApi
     {
         // Top-level folder in the content repo that always stays checked out.
@@ -455,6 +469,7 @@ namespace ContentRepo.Editor
         public static async Task CheckOutFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            await ThrowIfOperationInProgressAsync("check out a package");
 
             await EnsureSparseCheckoutAsync();
             
@@ -465,6 +480,14 @@ namespace ContentRepo.Editor
                 await TryRemoteAsync("pull", () => RunGitCommandAsync(
                     $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
                     ContentAbsolutePath));
+
+                var stopped = await GetOperationInProgressAsync() ?? (await HasUnresolvedConflictsAsync() ? "conflict" : null);
+                if (stopped != null)
+                {
+                    LastWarning = $"'{folder}' is checked out, but the pull stopped in a {stopped}. Its group files were left as they are. Resolve the conflict in your git client first.";
+                    Debug.LogWarning($"[ContentRepo] {LastWarning}");
+                    return;
+                }
 
                 // Adding a folder to the cone does not reliably clear git's skip-worktree bit on
                 // files that were already materialised on disk (e.g. content moved into the repo, or
@@ -494,6 +517,7 @@ namespace ContentRepo.Editor
         /// </summary>
         private static async Task<int> ResetGroupFilesToHeadAsync(string folder, bool deleteUntracked)
         {
+            await ThrowIfOperationInProgressAsync("reset the group files of a package");
             var root = ContentAbsolutePath;
             var committed = SplitPaths(await RunGitCommandAsync(
                     $"-c core.quotepath=off ls-tree --name-only HEAD {Quote(GroupsFolderName + "/")}", root))
@@ -547,6 +571,7 @@ namespace ContentRepo.Editor
         public static async Task DisconnectFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            await ThrowIfOperationInProgressAsync("disconnect a package");
 
             var current = await GetCheckedOutFoldersAsync(); // _groups is filtered out
             var remaining = current
@@ -584,9 +609,9 @@ namespace ContentRepo.Editor
         {
             try
             {
-                var output = RunGitCommandAsync($"ls-tree --name-only HEAD -- {Quote(repoRelativePath)}", ContentAbsolutePath)
+                var result = RunGitAsync($"ls-tree --name-only HEAD -- {Quote(repoRelativePath)}", ContentAbsolutePath)
                     .GetAwaiter().GetResult();
-                return !string.IsNullOrWhiteSpace(output);
+                return result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.Output);
             }
             catch { return false; }
         }
@@ -594,6 +619,7 @@ namespace ContentRepo.Editor
         public static async Task CreateFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            await ThrowIfOperationInProgressAsync("create a package");
 
             var localFolder = Path.Combine(ContentAbsolutePath, folder);
             if (Directory.Exists(localFolder))
@@ -642,6 +668,7 @@ namespace ContentRepo.Editor
         {
             ValidateFolderName(oldFolder);
             ValidateFolderName(newFolder);
+            await ThrowIfOperationInProgressAsync("rename a package");
 
             // Ordinal comparison so a case-only rename (e.g. "folder" -> "Folder") still proceeds.
             if (string.Equals(oldFolder, newFolder, StringComparison.Ordinal))
@@ -877,12 +904,15 @@ namespace ContentRepo.Editor
 
             // Stage the Addressable group asset and any schema files with --sparse: files in _groups/
             // may not be part of the sparse-checkout worktree definition, so a plain git add refuses them.
-            // Enumerate all matching files on disk so schemas are included if Unity writes them separately.
+            // Enumerate all matching files on disk so schemas are included if Unity writes them separately,
+            // plus committed ones that were deleted (not hidden with skip-worktree), so the deletion is committed.
             var groupFiles = GetGroupRelativePaths(folder).ToList();
-            if (groupFiles.Count > 0)
+            var deleted = await GetDeletedGroupFilesAsync(folder, groupFiles);
+            if (groupFiles.Count + deleted.Count > 0)
                 await RunGitCommandAsync(
-                    $"add --sparse -- {string.Join(" ", groupFiles.Select(Quote))}",
+                    $"add --sparse -- {string.Join(" ", groupFiles.Concat(deleted).Select(Quote))}",
                     ContentAbsolutePath);
+            groupFiles.AddRange(deleted.Where(IsCommitted));
 
             // Limit the commit to this package's own paths so nothing else that happens to be staged
             // (another package, or deletions from a damaged index) is committed under its name.
@@ -947,6 +977,7 @@ namespace ContentRepo.Editor
         public static async Task DeleteRemoteFolderAsync(string folder)
         {
             ValidateFolderName(folder);
+            await ThrowIfOperationInProgressAsync("delete a package");
             ContentGroupRegistry.Unregister(folder);
 
             var branch        = ContentRepoSettings.instance.Branch;
@@ -1129,7 +1160,21 @@ namespace ContentRepo.Editor
             return string.Join(", ", parts);
         }
 
-        public static Task<string> RunGitCommandAsync(string args, string workingDir = null, bool silent = true,
+        public static async Task<string> RunGitCommandAsync(string args, string workingDir = null, bool silent = true,
+            IReadOnlyDictionary<string, string> environment = null)
+        {
+            var result = await RunGitAsync(args, workingDir, silent, environment).ConfigureAwait(false);
+            if (result.ExitCode != 0)
+            {
+                var err = result.Error.Trim();
+                if (string.IsNullOrEmpty(err)) err = result.Output.Trim();
+                throw new InvalidOperationException($"git {args} failed (exit {result.ExitCode}): {err}");
+            }
+            return result.Output;
+        }
+
+        /// <summary>Runs git and returns its exit code and output without treating a non-zero exit as an error.</summary>
+        public static Task<GitResult> RunGitAsync(string args, string workingDir = null, bool silent = true,
             IReadOnlyDictionary<string, string> environment = null)
         {
             var startInfo = new ProcessStartInfo
@@ -1177,15 +1222,7 @@ namespace ContentRepo.Editor
                     process.BeginErrorReadLine();
                     process.WaitForExit();
 
-                    if (process.ExitCode != 0)
-                    {
-                        var err = stderr.ToString().Trim();
-                        if (string.IsNullOrEmpty(err)) err = stdout.ToString().Trim();
-                        throw new InvalidOperationException(
-                            $"git {args} failed (exit {process.ExitCode}): {err}");
-                    }
-
-                    return stdout.ToString();
+                    return new GitResult(process.ExitCode, stdout.ToString(), stderr.ToString());
                 }
             });
         }
@@ -1249,27 +1286,40 @@ namespace ContentRepo.Editor
         {
             if (initializing) return false;
             await EnsurePartialCloneAsync();
-            if (await GetOperationInProgressAsync() != null) return false;
+            if (await GetOperationInProgressAsync() != null || await HasUnresolvedConflictsAsync()) return false;
             var repaired = await RepairIndexCoreAsync();
             if (await RestoreHiddenSharedFilesAsync()) repaired = true;
             return repaired;
         }
 
         /// <summary>
-        /// "merge", "rebase", "cherry-pick" or "revert" while git is in the middle of one (typically a pull that
-        /// hit a conflict), otherwise null. In that state the index holds other people's incoming changes: they
-        /// show up as local changes, and rebuilding the index or discarding them would throw that work away.
+        /// "rebase", "am", "merge", "cherry-pick" or "revert" while git is in the middle of one (typically a pull
+        /// that hit a conflict), otherwise null. The name is the git command that continues or aborts it. In that
+        /// state the index holds changes that are not committed on this branch yet: they show up as local
+        /// changes, and rebuilding the index or discarding them would throw that work away.
         /// </summary>
         public static async Task<string> GetOperationInProgressAsync()
         {
             string gitDir;
             try { gitDir = (await RunGitCommandAsync("rev-parse --absolute-git-dir", ContentAbsolutePath)).Trim(); }
             catch { return null; }
+            if (Directory.Exists(Path.Combine(gitDir, "rebase-merge"))) return "rebase";
+            var applying = Path.Combine(gitDir, "rebase-apply");
+            if (Directory.Exists(applying)) return File.Exists(Path.Combine(applying, "applying")) ? "am" : "rebase";
             if (File.Exists(Path.Combine(gitDir, "MERGE_HEAD"))) return "merge";
-            if (Directory.Exists(Path.Combine(gitDir, "rebase-merge")) || Directory.Exists(Path.Combine(gitDir, "rebase-apply"))) return "rebase";
             if (File.Exists(Path.Combine(gitDir, "CHERRY_PICK_HEAD"))) return "cherry-pick";
             if (File.Exists(Path.Combine(gitDir, "REVERT_HEAD"))) return "revert";
             return null;
+        }
+
+        /// <summary>
+        /// True while files have unresolved conflicts, also when no operation is in progress (for example after
+        /// a conflicting <c>git stash pop</c>). Such files contain conflict markers and must not be committed.
+        /// </summary>
+        public static async Task<bool> HasUnresolvedConflictsAsync()
+        {
+            try { return !string.IsNullOrWhiteSpace(await RunGitCommandAsync("ls-files -u", ContentAbsolutePath)); }
+            catch { return false; }
         }
 
         /// <summary>Aborts the merge, rebase, cherry-pick or revert in progress and returns to the state before it.</summary>
@@ -1297,7 +1347,10 @@ namespace ContentRepo.Editor
             if (operation != null)
                 throw new InvalidOperationException(
                     $"The content repository is in the middle of a {operation}. Finish or abort it before you {action}: " +
-                    "the changes shown include other people's incoming work.");
+                    "the changes shown include work that is not committed on this branch yet.");
+            if (await HasUnresolvedConflictsAsync())
+                throw new InvalidOperationException(
+                    $"The content repository has files with unresolved conflicts. Resolve them in your git client before you {action}.");
         }
 
         private const string LegacyMetasMigratedKey = "contentrepo.legacyDisconnectMigrated";
@@ -1459,6 +1512,26 @@ namespace ContentRepo.Editor
                 }
             }
             catch { /* best-effort — if this fails, the caller's operation may still succeed */ }
+        }
+
+        /// <summary>
+        /// Schema files of the package that are tracked but were deleted on disk (not hidden with skip-worktree).
+        /// The main group file is never included: its committed copy keeps the package's bundle identity, and a
+        /// committed deletion would let every machine create a new group with a new identity.
+        /// </summary>
+        private static async Task<List<string>> GetDeletedGroupFilesAsync(string folder, List<string> onDisk)
+        {
+            var root = ContentAbsolutePath;
+            var main = new[] { $"{folder}.asset", $"{folder}.asset.meta" };
+            var tracked = SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off ls-files -v -- {Quote(GroupsFolderName + "/")}", root))
+                .Where(line => line.Length > 2 && line[0] == 'H' && line[1] == ' ')
+                .Select(line => line.Substring(2))
+                .Where(path => IsGroupFileOf(folder, Path.GetFileName(path)))
+                .Where(path => !main.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            return tracked
+                .Where(path => !onDisk.Contains(path, StringComparer.OrdinalIgnoreCase) && !File.Exists(Path.Combine(root, path)))
+                .ToList();
         }
 
         // Returns repo-relative paths for all group + schema files that belong to `folder` and exist on disk.
