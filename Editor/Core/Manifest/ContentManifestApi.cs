@@ -25,8 +25,7 @@ namespace ContentRepo.Editor
             if (string.IsNullOrWhiteSpace(generation)) throw new ArgumentException("generation required.");
 
             var remoteKey = $"{generation}/{environment}/{ManifestFileName}";
-            var existingJson = await provider.DownloadTextAsync(remoteKey);
-            var manifest = ContentManifest.FromJson(existingJson) ?? new ContentManifest { environment = environment };
+            var manifest = await ReadForUpdateAsync(remoteKey, provider) ?? new ContentManifest { environment = environment };
 
             manifest.environment = environment;
             manifest.updatedAt = DateTime.UtcNow.ToString("O");
@@ -49,8 +48,7 @@ namespace ContentRepo.Editor
             UploadLogHandler log = null)
         {
             var remoteKey = $"{generation}/{environment}/{ManifestFileName}";
-            var existingJson = await provider.DownloadTextAsync(remoteKey);
-            var manifest = ContentManifest.FromJson(existingJson) ?? new ContentManifest { environment = environment };
+            var manifest = await ReadForUpdateAsync(remoteKey, provider) ?? new ContentManifest { environment = environment };
 
             manifest.environment = environment;
             manifest.updatedAt = DateTime.UtcNow.ToString("O");
@@ -71,8 +69,7 @@ namespace ContentRepo.Editor
             UploadLogHandler log = null)
         {
             var remoteKey = $"{generation}/{environment}/{ManifestFileName}";
-            var existingJson = await provider.DownloadTextAsync(remoteKey);
-            var manifest = ContentManifest.FromJson(existingJson);
+            var manifest = await ReadForUpdateAsync(remoteKey, provider);
             if (manifest == null) return;
 
             manifest.contentPackages.RemoveAll(e => string.Equals(e.name, contentPackageName, StringComparison.Ordinal));
@@ -94,14 +91,25 @@ namespace ContentRepo.Editor
             UploadLogHandler log = null)
         {
             var remoteKey = $"{generation}/{environment}/{ManifestFileName}";
-            var existingJson = await provider.DownloadTextAsync(remoteKey);
-            var manifest = ContentManifest.FromJson(existingJson) ?? new ContentManifest { environment = environment };
+            var manifest = await ReadForUpdateAsync(remoteKey, provider) ?? new ContentManifest { environment = environment };
 
             manifest.minAppVersion = minAppVersion;
             manifest.recommendedAppVersion = recommendedAppVersion;
             manifest.updatedAt = DateTime.UtcNow.ToString("O");
 
             await UploadManifestAsync(manifest, remoteKey, provider, log);
+        }
+
+        /// <summary>
+        /// The current manifest before it is changed and written back, or null when there is none yet. Throws when the
+        /// read fails or the file cannot be parsed, so a write never replaces a manifest it could not read.
+        /// </summary>
+        private static async Task<ContentManifest> ReadForUpdateAsync(string remoteKey, IContentUploadProvider provider)
+        {
+            var json = await provider.DownloadTextAsync(remoteKey);
+            if (json == null) return null;
+            return ContentManifest.FromJson(json)
+                ?? throw new InvalidDataException($"The manifest at '{remoteKey}' could not be parsed, so it was not changed. Fix or remove it first.");
         }
 
         private static async Task UploadManifestAsync(

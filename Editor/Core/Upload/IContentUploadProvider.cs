@@ -18,7 +18,11 @@ namespace ContentRepo.Editor
         /// <summary>Upload a single local file to an exact remote key.</summary>
         Task UploadFileAsync(string localFilePath, string remoteKey, UploadLogHandler log = null);
 
-        /// <summary>Download the text content of a remote key, or null when the object does not exist.</summary>
+        /// <summary>
+        /// Download the text content of a remote key, or null when the object does not exist. Any other failure
+        /// (network, credentials, permissions, a missing bucket) throws: callers decide what to delete or overwrite
+        /// from this result, so a failed read must never look like a missing object.
+        /// </summary>
         Task<string> DownloadTextAsync(string remoteKey);
 
         /// <summary>Issue a CDN cache invalidation for <paramref name="path"/> (e.g. "/gen/2/production/manifest.json").</summary>

@@ -86,18 +86,23 @@ Resources:
                   return
 
               # Load both manifests to check for live references.
+              # A missing manifest references nothing. One that cannot be read or parsed stops the cleanup of this
+              # generation: deleting without knowing what is live could remove bundles production still serves.
               live_build_ids = set()
               for env_suffix in ["staging/manifest.json", "production/manifest.json"]:
                   try:
                       obj = s3.get_object(Bucket=BUCKET, Key=f"{gen}/{env_suffix}")
                       manifest = json.loads(obj["Body"].read().decode("utf-8"))
-                      for pkg in manifest.get("contentPackages", []):
-                          for plat in pkg.get("platforms", []):
-                              bid = plat.get("buildId", "")
-                              if bid:
-                                  live_build_ids.add(bid)
-                  except Exception:
-                      pass  # Missing manifest is fine — skip it.
+                  except s3.exceptions.NoSuchKey:
+                      continue
+                  except Exception as e:
+                      print(f"[{gen}] Could not read {env_suffix}, skipping cleanup: {e}")
+                      return
+                  for pkg in manifest.get("contentPackages", []):
+                      for plat in pkg.get("platforms", []):
+                          bid = plat.get("buildId", "")
+                          if bid:
+                              live_build_ids.add(bid)
 
               now = datetime.now(timezone.utc)
               surviving = []

@@ -66,6 +66,22 @@ When a package's staging build differs from production, a **Promote** button app
 
 Promotion only rewrites the production manifest to point at the staging build — no files move.
 
+Every step that deletes bundles or rewrites a manifest or the delete-schedule first reads the current state
+from S3. Only a file that does not exist counts as empty. When a read fails (network, credentials,
+permissions) or a file that exists cannot be parsed (including an empty file), nothing is deleted or
+overwritten: the staging prune after an upload keeps the previous build and logs why; **Remove from
+staging** stops before changing anything when the staging manifest cannot be read, and keeps the
+bundles (logging why) when production or the delete-schedule cannot be checked; manifest writes and the
+retention cleanup stop with an error; a promote to production stops before production changes when the
+delete-schedule cannot be read, and once production is updated, a later failure to update the schedule
+only logs a warning (the superseded build then stays on S3 unscheduled).
+This relies on the `s3:ListBucket` permission from [Setup-AWS.md](Setup-AWS.md), without which S3 reports
+a missing file as "access denied". The cleanup Lambda template stops the same way on a manifest it cannot
+read (this takes effect when the stack is redeployed). Promoting to production removes any old
+delete-schedule entry of the builds that are live afterwards, and scheduling a build that already has an
+entry moves its date forward, so a build that went live again gets the full retention window when it is
+superseded.
+
 Promote fetches first and warns, listing the reasons, when a staging build that would go live does not
 match the content repository (checked for every platform in the entry), when a recent merge dropped
 changes to the package, or when the fetch failed. **Promote all** checks every checked-out package it

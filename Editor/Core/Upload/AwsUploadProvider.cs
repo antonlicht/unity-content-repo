@@ -49,15 +49,29 @@ namespace ContentRepo.Editor
             // authoritative version. CloudFront invalidations can take 30s–2min to propagate,
             // causing stale manifest reads immediately after upload (wrong UI state) and
             // read-before-write corruption when two editors upload concurrently.
+            //
+            // s3api get-object names the error ("NoSuchKey", "AccessDenied", "NoSuchBucket", connection failures), unlike
+            // `s3 cp --quiet`, which exits 1 for all of them. Only NoSuchKey means the object does not exist; with
+            // s3:ListBucket granted (see Setup-AWS.md) S3 reports a missing key that way rather than as AccessDenied.
             RequireBucket();
-            var s3Uri    = $"s3://{S.S3BucketName}/{remoteKey.TrimStart('/')}";
+            var key      = remoteKey.TrimStart('/');
             var tempFile = Path.Combine(Path.GetTempPath(), $"content-repo-dl-{Guid.NewGuid():N}");
             try
             {
-                await RunAwsAsync($"s3 cp \"{s3Uri}\" \"{tempFile}\" --region {S.S3Region} --quiet", log: null);
-                return File.Exists(tempFile) ? await Task.Run(() => File.ReadAllText(tempFile)) : null;
+                try
+                {
+                    await RunAwsAsync($"s3api get-object --bucket {S.S3BucketName} --key \"{key}\" \"{tempFile}\" --region {S.S3Region}", log: null);
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("(NoSuchKey)"))
+                {
+                    return null;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    throw new InvalidOperationException($"Could not read s3://{S.S3BucketName}/{key}: {ex.Message}", ex);
+                }
+                return await Task.Run(() => File.ReadAllText(tempFile));
             }
-            catch { return null; }
             finally
             {
                 try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { /* best-effort */ }

@@ -85,8 +85,8 @@ namespace ContentRepo.Editor
                 // Capture the build this environment currently points at (before we overwrite it), so a
                 // staging upload can prune the now-superseded bundles below.
                 string previousBuildId = null;
-                try { previousBuildId = (await GetManifestAsync(environment))?.Find(contentPackageName)?.FindPlatform(platform)?.buildId; }
-                catch { /* no current manifest — nothing to supersede */ }
+                try { previousBuildId = (await ReadManifestAsync(environment, generation, provider))?.Find(contentPackageName)?.FindPlatform(platform)?.buildId; }
+                catch (Exception ex) { log?.Invoke($"[Upload] Could not read the {environment} manifest, so the build it replaces will not be pruned: {ex.Message}"); }
 
                 await ContentManifestApi.UpsertEntryAsync(environment, generation, manifestEntry, provider, log);
 
@@ -146,20 +146,12 @@ namespace ContentRepo.Editor
             if (string.IsNullOrEmpty(previousBuildId) || previousBuildId == newBuildId) return;
 
             // Never delete a build production points at — promotion copies the entry, so prod shares the
-            // same buildId + S3 path; deleting it would pull the bundles out from under production.
-            var prodJson = await provider.DownloadTextAsync($"{generation}/{settings.ProductionPrefix}/manifest.json") ?? "";
-            if (prodJson.Contains(previousBuildId))
+            // same buildId + S3 path; deleting it would pull the bundles out from under production. Never delete a
+            // build being retained for rollback either; the daily cleanup Lambda handles those on their own schedule.
+            var keepReason = await GetKeepReasonAsync(previousBuildId, generation, provider);
+            if (keepReason != null)
             {
-                log?.Invoke($"[Upload] Kept superseded build {previousBuildId} — still referenced by production.");
-                return;
-            }
-
-            // Never delete a build being retained for rollback (once production retention is wired up it
-            // records builds here); the daily cleanup Lambda handles those on their own schedule.
-            var scheduleJson = await provider.DownloadTextAsync($"{generation}/delete-schedule.json") ?? "";
-            if (scheduleJson.Contains(previousBuildId))
-            {
-                log?.Invoke($"[Upload] Kept superseded build {previousBuildId} — retained by the delete-schedule.");
+                log?.Invoke($"[Upload] Kept superseded build {previousBuildId} — {keepReason}.");
                 return;
             }
 
@@ -219,25 +211,19 @@ namespace ContentRepo.Editor
             var generation = ContentRepoGenerationSettings.instance.Generation;
             var provider   = ContentUploadProviderFactory.Resolve();
 
-            // Capture the staging buildId before dropping the entry, so we know which bundles to prune.
-            var stagingManifest = await GetManifestAsync(settings.StagingPrefix);
+            // Capture the staging buildId before dropping the entry, so we know which bundles to prune. A failed read
+            // of the staging manifest aborts here, before anything changes.
+            var stagingManifest = await ReadManifestAsync(settings.StagingPrefix, generation, provider);
             var buildId = stagingManifest?.Find(package)?.FindPlatform(platform)?.buildId;
 
             await RemoveFromManifestAsync(package, settings.StagingPrefix, log);
 
             if (string.IsNullOrEmpty(buildId)) return;
 
-            var prodJson = await provider.DownloadTextAsync($"{generation}/{settings.ProductionPrefix}/manifest.json") ?? "";
-            if (prodJson.Contains(buildId))
+            var keepReason = await GetKeepReasonAsync(buildId, generation, provider);
+            if (keepReason != null)
             {
-                log?.Invoke($"[Upload] Removed '{package}' from staging; kept build {buildId} bundles — still referenced by production.");
-                return;
-            }
-
-            var scheduleJson = await provider.DownloadTextAsync($"{generation}/delete-schedule.json") ?? "";
-            if (scheduleJson.Contains(buildId))
-            {
-                log?.Invoke($"[Upload] Removed '{package}' from staging; kept build {buildId} bundles — retained by the delete-schedule.");
+                log?.Invoke($"[Upload] Removed '{package}' from staging; kept build {buildId} bundles — {keepReason}.");
                 return;
             }
 
@@ -295,22 +281,60 @@ namespace ContentRepo.Editor
             // build for deletion after the retention window. The daily cleanup Lambda drains the
             // schedule and never deletes a build a manifest still references, so this is safe.
             var settings = ContentUploadSettings.instance;
+            var toProduction = string.Equals(toEnvironment, settings.ProductionPrefix, StringComparison.Ordinal);
+
+            // The delete-schedule must be readable before production changes: a promote that cannot keep it consistent
+            // stops here, with production unchanged.
+            if (toProduction) await GetDeleteScheduleAsync(generation, provider);
+
             ContentManifestEntry supersededProd = null;
-            if (string.Equals(toEnvironment, settings.ProductionPrefix, StringComparison.Ordinal))
-                try { supersededProd = (await GetManifestAsync(toEnvironment))?.Find(contentPackageName); } catch { /* no prod yet */ }
+            if (toProduction)
+                try { supersededProd = (await ReadManifestAsync(toEnvironment, generation, provider))?.Find(contentPackageName); }
+                catch (Exception ex) { log?.Invoke($"[Promote] WARNING: could not read the {toEnvironment} manifest, so the build it replaces will not be scheduled for deletion and stays on S3: {ex.Message}"); }
 
             await ContentManifestApi.UpsertEntryAsync(toEnvironment, generation, entry, provider, log);
+
+            if (toProduction)
+            {
+                // A build that is live again (a rollback, or an identical rebuild) may still carry an old delete date;
+                // drop it, so the build gets a full retention window when it is superseded again. Platforms the promoted
+                // entry does not carry stay live too. If this fails the old date stays, which is harmless while the
+                // build is live: cleanup skips live builds and scheduling it again moves the date forward.
+                var live = entry.platforms.Select(p => p.buildId).ToList();
+                if (supersededProd?.platforms != null)
+                    live.AddRange(supersededProd.platforms.Where(p => entry.FindPlatform(p.platform) == null).Select(p => p.buildId));
+                try { await UnscheduleAsync(live, generation, provider, log); }
+                catch (Exception ex) { log?.Invoke($"[Promote] WARNING: could not clear old delete-schedule entries of the live builds: {ex.Message}"); }
+            }
 
             if (supersededProd?.platforms != null)
                 foreach (var oldPlat in supersededProd.platforms)
                 {
-                    var newBuildId = entry.FindPlatform(oldPlat.platform)?.buildId;
-                    if (!string.IsNullOrEmpty(oldPlat.buildId) && oldPlat.buildId != newBuildId)
+                    var promoted = entry.FindPlatform(oldPlat.platform);
+                    if (promoted == null || string.IsNullOrEmpty(oldPlat.buildId) || oldPlat.buildId == promoted.buildId) continue;
+                    try
+                    {
                         await MarkForDeletionAsync(oldPlat.buildId, generation, contentPackageName,
                             oldPlat.platform, settings.ProductionRetentionDays, log);
+                    }
+                    catch (Exception ex)
+                    {
+                        log?.Invoke($"[Promote] WARNING: the superseded build {oldPlat.buildId} was not scheduled for deletion and stays on S3: {ex.Message}");
+                    }
                 }
 
             log?.Invoke("[Promote] Done.");
+        }
+
+        private static async Task UnscheduleAsync(IEnumerable<string> liveBuildIds, string generation, IContentUploadProvider provider, UploadLogHandler log)
+        {
+            var ids = new HashSet<string>(liveBuildIds.Where(id => !string.IsNullOrEmpty(id)), StringComparer.Ordinal);
+            if (ids.Count == 0) return;
+            var schedule = await GetDeleteScheduleAsync(generation, provider);
+            var removed = schedule.entries.RemoveAll(e => ids.Contains(e.buildId ?? "") && string.Equals(e.generation, generation, StringComparison.Ordinal));
+            if (removed == 0) return;
+            await SaveDeleteScheduleAsync(generation, schedule, provider, log);
+            log?.Invoke($"[Promote] Removed {removed} old delete-schedule entr{(removed == 1 ? "y" : "ies")} of builds that are live in production.");
         }
 
         public static async Task PromoteAllAsync(
@@ -383,13 +407,28 @@ namespace ContentRepo.Editor
             var provider = ContentUploadProviderFactory.Resolve();
             var schedule = await GetDeleteScheduleAsync(generation, provider);
 
-            if (schedule.Contains(buildId, generation))
+            var now = DateTime.UtcNow;
+            var existing = schedule.entries.Find(e =>
+                string.Equals(e.buildId, buildId, StringComparison.Ordinal) && string.Equals(e.generation, generation, StringComparison.Ordinal));
+            if (existing != null)
             {
-                log?.Invoke($"[Cleanup] buildId={buildId} is already scheduled for deletion.");
+                // A build that went live again (a rollback) and is now superseded once more keeps the full retention
+                // window from now, not the date from its first time.
+                var deleteAfter = now.AddDays(retentionDays);
+                if (DateTime.TryParse(existing.deleteAfter, null, System.Globalization.DateTimeStyles.RoundtripKind, out var scheduled)
+                    && scheduled.ToUniversalTime() >= deleteAfter)
+                {
+                    log?.Invoke($"[Cleanup] buildId={buildId} is already scheduled for deletion.");
+                    return;
+                }
+                existing.markedAt = now.ToString("O");
+                existing.deleteAfter = deleteAfter.ToString("O");
+                existing.markedBy = Environment.MachineName;
+                await SaveDeleteScheduleAsync(generation, schedule, provider, log);
+                log?.Invoke($"[Cleanup] buildId={buildId} was already scheduled; its deletion moved to {retentionDays} days from now.");
                 return;
             }
 
-            var now = DateTime.UtcNow;
             schedule.Add(new DeleteScheduleEntry
             {
                 buildId = buildId,
@@ -471,16 +510,19 @@ namespace ContentRepo.Editor
             var due = schedule.DueEntries();
 
             log?.Invoke($"[Cleanup] {due.Count} build(s) due for deletion.");
+            if (due.Count == 0) return 0;
 
-            // Fetch both manifests to safety-check references.
+            // Fetch both manifests to safety-check references. A manifest that does not exist references nothing; one
+            // that cannot be read throws here, before anything is deleted or written.
             var stgKey = $"{generation}/{ContentUploadSettings.instance.StagingPrefix}/manifest.json";
             var prdKey = $"{generation}/{ContentUploadSettings.instance.ProductionPrefix}/manifest.json";
-            var stgJson = await provider.DownloadTextAsync(stgKey) ?? "";
-            var prdJson = await provider.DownloadTextAsync(prdKey) ?? "";
+            var live = await GetLiveBuildIdsAsync(stgKey, provider);
+            live.UnionWith(await GetLiveBuildIdsAsync(prdKey, provider));
+            var removed = 0;
 
             foreach (var entry in due)
             {
-                if (stgJson.Contains(entry.buildId) || prdJson.Contains(entry.buildId))
+                if (live.Contains(entry.buildId ?? ""))
                 {
                     log?.Invoke($"[Cleanup] Skipping buildId={entry.buildId} — still referenced by a manifest.");
                     continue;
@@ -491,6 +533,7 @@ namespace ContentRepo.Editor
                 {
                     await DeleteS3PrefixAsync(prefix, provider, log);
                     schedule.Remove(entry.buildId, entry.generation);
+                    removed++;
                     log?.Invoke($"[Cleanup] Deleted {prefix}");
                 }
                 catch (Exception ex)
@@ -500,7 +543,7 @@ namespace ContentRepo.Editor
                 }
             }
 
-            await SaveDeleteScheduleAsync(generation, schedule, provider, log);
+            if (removed > 0) await SaveDeleteScheduleAsync(generation, schedule, provider, log);
             return failed;
         }
 
@@ -533,11 +576,74 @@ namespace ContentRepo.Editor
             return ContentBuildApi.GetArtifactPath(pkg, buildId, platform);
         }
 
+        /// <summary>
+        /// The delete-schedule, or an empty one when it does not exist yet. Throws when the read fails or the file
+        /// cannot be parsed, so the schedule is never rewritten from a state that was not actually read.
+        /// </summary>
         private static async Task<DeleteSchedule> GetDeleteScheduleAsync(string generation, IContentUploadProvider provider)
         {
             var key = $"{generation}/delete-schedule.json";
             var json = await provider.DownloadTextAsync(key);
-            return DeleteSchedule.FromJson(json);
+            if (json == null) return new DeleteSchedule();
+            if (string.IsNullOrWhiteSpace(json))
+                throw new InvalidDataException($"The delete-schedule at '{key}' is empty, so it was not changed. Fix or remove it first.");
+            DeleteSchedule schedule;
+            try { schedule = JsonUtility.FromJson<DeleteSchedule>(json); }
+            catch (Exception ex) { throw new InvalidDataException($"The delete-schedule at '{key}' could not be parsed, so it was not changed: {ex.Message}"); }
+            if (schedule == null) throw new InvalidDataException($"The delete-schedule at '{key}' could not be parsed, so it was not changed.");
+            schedule.entries ??= new List<DeleteScheduleEntry>();
+            return schedule;
+        }
+
+        /// <summary>
+        /// Why a build's bundles must stay on S3 — production still serves it, or the delete-schedule retains it for
+        /// rollback — or null when it may be deleted. When either file cannot be read the build is kept as well:
+        /// deleting on a guess could pull the bundles out from under production.
+        /// </summary>
+        private static async Task<string> GetKeepReasonAsync(string buildId, string generation, IContentUploadProvider provider)
+        {
+            var settings = ContentUploadSettings.instance;
+            try
+            {
+                if ((await GetLiveBuildIdsAsync($"{generation}/{settings.ProductionPrefix}/manifest.json", provider)).Contains(buildId))
+                    return "still referenced by production";
+                if ((await GetDeleteScheduleAsync(generation, provider)).entries.Exists(e => string.Equals(e.buildId, buildId, StringComparison.Ordinal)))
+                    return "retained by the delete-schedule";
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return $"could not check the production manifest and delete-schedule ({ex.Message})";
+            }
+        }
+
+        /// <summary>
+        /// The manifest of an environment, or null when it does not exist yet. Unlike <see cref="GetManifestAsync"/>, a
+        /// failed read throws, for the steps that decide from it what to delete or schedule.
+        /// </summary>
+        private static async Task<ContentManifest> ReadManifestAsync(string environment, string generation, IContentUploadProvider provider)
+        {
+            var key = $"{generation}/{environment}/manifest.json";
+            var json = await provider.DownloadTextAsync(key);
+            if (json == null) return null;
+            return ContentManifest.FromJson(json) ?? throw new InvalidDataException($"The manifest at '{key}' could not be parsed.");
+        }
+
+        /// <summary>
+        /// The build ids a manifest serves, empty when the manifest does not exist. Throws when it cannot be read or
+        /// parsed: a manifest nobody can read may still be what players have cached, so it must not count as empty.
+        /// </summary>
+        private static async Task<HashSet<string>> GetLiveBuildIdsAsync(string manifestKey, IContentUploadProvider provider)
+        {
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            var json = await provider.DownloadTextAsync(manifestKey);
+            if (json == null) return ids;
+            var manifest = ContentManifest.FromJson(json)
+                ?? throw new InvalidDataException($"The manifest at '{manifestKey}' could not be parsed.");
+            foreach (var package in manifest.contentPackages ?? new List<ContentManifestEntry>())
+                foreach (var platform in package?.platforms ?? new List<ContentManifestPlatformEntry>())
+                    if (!string.IsNullOrEmpty(platform?.buildId)) ids.Add(platform.buildId);
+            return ids;
         }
 
         private static async Task SaveDeleteScheduleAsync(string generation, DeleteSchedule schedule,
