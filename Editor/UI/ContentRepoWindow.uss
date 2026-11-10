@@ -173,6 +173,23 @@
     background-color: rgba(220, 80, 80, 0.2);
 }
 
+.cs-icon-btn.cs-checkout-btn {
+    margin-right: 6px;
+    background-color: rgb(58, 121, 187);
+}
+
+.cs-icon-btn.cs-checkout-btn:hover {
+    background-color: rgb(84, 148, 214);
+}
+
+.cs-icon-btn.cs-checkout-btn:active {
+    background-color: rgb(44, 99, 158);
+}
+
+.cs-checkout-btn .cs-icon-image {
+    --unity-image-tint-color: rgb(255, 255, 255);
+}
+
 .cs-icon-image {
     flex-grow: 1;
     flex-shrink: 0;
@@ -417,6 +434,41 @@
     color: rgb(90, 150, 240);
 }
 
+.cs-deploy-badge {
+    flex-direction: row;
+    align-items: center;
+}
+
+.cs-deploy-badge > Label {
+    margin: 0;
+    padding: 0;
+    font-size: 10px;
+}
+
+.cs-deploy-badge-icon {
+    width: 10px;
+    height: 10px;
+    margin-left: 4px;
+    flex-shrink: 0;
+}
+
+.cs-badge--stg .cs-deploy-badge-icon {
+    --unity-image-tint-color: rgb(80, 200, 100);
+}
+
+.cs-badge--prod .cs-deploy-badge-icon {
+    --unity-image-tint-color: rgb(90, 150, 240);
+}
+
+.cs-badge--sync-warn {
+    background-color: rgba(225, 140, 20, 0.32);
+    color: rgb(255, 205, 110);
+}
+
+.cs-badge--sync-warn .cs-deploy-badge-icon {
+    --unity-image-tint-color: rgb(255, 205, 110);
+}
+
 .cs-menu-btn {
     font-size: 18px;
     -unity-font-style: bold;
@@ -424,8 +476,17 @@
     letter-spacing: 0;
 }
 
-.cs-pipeline-row--remote {
+.cs-pipeline-row--remote .cs-pipeline-name,
+.cs-pipeline-row--remote .cs-menu-btn {
     opacity: 0.5;
+}
+
+.cs-pipeline-row--remote .cs-badge {
+    opacity: 0.6;
+}
+
+.cs-pipeline-row--remote .cs-badge--sync-warn {
+    opacity: 1;
 }
 
 .cs-warn-icon {

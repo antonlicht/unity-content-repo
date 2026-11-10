@@ -23,6 +23,11 @@ namespace ContentRepo.Editor
         private Label         genWarningLabel;
         private Button        bumpGenerationBtn, ackUnityVersionBtn;
 
+        // Merge / rebase in progress banner
+        private VisualElement operationBanner;
+        private Label         operationLabel;
+        private Button        abortOperationBtn;
+
         // Top bar
         private Button      refreshBtn, pullAllBtn, buildAllBtn;
         private Button      uploadAllBtn, promoteAllBtn;
@@ -58,6 +63,9 @@ namespace ContentRepo.Editor
         private VisualTreeAsset rowTemplate;
         private ContentManifest stagingManifest;
         private ContentManifest productionManifest;
+        private Dictionary<string, PackageSync> packageSync = new(StringComparer.OrdinalIgnoreCase);
+        private string operationInProgress;
+        private int syncVersion;
         private bool busy;
         private bool polling;
         private bool projectChangedPending;
@@ -122,6 +130,10 @@ namespace ContentRepo.Editor
             bumpGenerationBtn = Q<Button>("btn-bump-generation");
             ackUnityVersionBtn = Q<Button>("btn-ack-unity-version");
 
+            operationBanner   = Q<VisualElement>("operation-banner");
+            operationLabel    = Q<Label>("operation-label");
+            abortOperationBtn = Q<Button>("btn-abort-operation");
+
             // Top bar — buttons then their icon images, left to right
             refreshBtn          = Q<Button>("btn-refresh");
             Q<Image>("img-refresh").image   = LoadIcon("refresh-cw");
@@ -177,6 +189,14 @@ namespace ContentRepo.Editor
             refreshBtn.clicked += () => _ = RunAsync("Refreshing…", RefreshManifestsAsync);
             pullAllBtn.clicked += () => _ = RunAsync("Pulling all…", ContentGitApi.PullAllAsync);
             initBtn.clicked    += () => _ = RunAsync("Initializing…", ContentGitApi.InitAsync);
+            abortOperationBtn.clicked += () =>
+            {
+                var operation = operationInProgress;
+                if (operation == null) return;
+                if (EditorUtility.DisplayDialog($"Abort {operation}",
+                    $"Abort the {operation} and return to the state before it?\nConflict resolutions made since it started are lost.", $"Abort {operation}", "Cancel"))
+                    _ = RunAsync($"Aborting {operation}…", ContentGitApi.AbortOperationAsync);
+            };
 
             var createFolderBtn = Q<Button>("btn-create-folder");
             var newFolderLabel  = Q<Label>("new-folder-label");
@@ -225,35 +245,24 @@ namespace ContentRepo.Editor
             bumpGenerationBtn.clicked  += () => { ContentRepoGenerationSettings.instance.BumpGeneration();          RefreshGenerationWarning(); };
             ackUnityVersionBtn.clicked += () => { ContentRepoGenerationSettings.instance.AcknowledgeUnityVersion(); RefreshGenerationWarning(); };
 
-            buildAllBtn.clicked += () => _ = RunPipelineAsync("Building all…",
-                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog); Rebuild(); },
-                deployLog);
+            buildAllBtn.clicked += () => _ = RunBuildAsync(checkedOutFolders.ToList(), "Building all…",
+                async () => { await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog); Rebuild(); });
 
             uploadAllBtn.clicked += () => _ = RunPipelineAsync("Uploading all to staging…",
                 async () => { await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog); await RefreshManifestsAsync(); },
                 deployLog);
 
-            promoteAllBtn.clicked += () =>
-            {
-                var staging    = ContentUploadSettings.instance.StagingPrefix;
-                var production = ContentUploadSettings.instance.ProductionPrefix;
-                if (!EditorUtility.DisplayDialog("Promote all to production",
-                    $"Promote all checked-out packages from {staging} → {production}?\nOnly the manifest is updated — no files move.",
-                    "Promote", "Cancel")) return;
-                _ = RunPipelineAsync("Promoting all → production…",
-                    async () => { await ContentUploadApi.PromoteAllAsync(staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
-                    deployLog);
-            };
+            promoteAllBtn.clicked += () => _ = PromoteAsync(null);
 
             moreAllMenu.menu.AppendAction("Build and Deploy All", _ =>
             {
-                var __ = RunPipelineAsync("Build and Deploy All…",
+                var __ = RunBuildAsync(checkedOutFolders.ToList(), "Build and Deploy All…",
                     async () =>
                     {
                         await ContentBuildApi.BuildAllCheckedOutAsync(AppendDeployLog);
                         await ContentUploadApi.UploadAllCheckedOutAsync(StagingKey(), AppendDeployLog);
                         await RefreshManifestsAsync();
-                    }, deployLog);
+                    });
             });
 
             deployLambdaBtn.clicked += () => _ = RunPipelineAsync("Deploying cleanup Lambda…",
@@ -375,8 +384,59 @@ namespace ContentRepo.Editor
             }
             catch { /* credentials not configured yet */ }
             _ = RefreshStackStatusAsync();
+            await RefreshSyncAsync();
             if (!busy) Rebuild();
             UpdateToolbarVisibility();
+        }
+
+        private async Task RefreshSyncAsync()
+        {
+            var version = ++syncVersion;
+            if (isInitialized != true) return;
+
+            var platform   = EditorUserBuildSettings.activeBuildTarget.ToString();
+            var staging    = stagingManifest;
+            var production = productionManifest;
+            var checkedOut = new HashSet<string>(checkedOutFolders, StringComparer.OrdinalIgnoreCase);
+            var packages   = new HashSet<string>(checkedOut, StringComparer.OrdinalIgnoreCase);
+            packages.UnionWith(repoFolders);
+            if (staging    != null) foreach (var e in staging.contentPackages)    packages.Add(e.name);
+            if (production != null) foreach (var e in production.contentPackages) packages.Add(e.name);
+
+            var result = new Dictionary<string, PackageSync>(StringComparer.OrdinalIgnoreCase);
+            string operation = null;
+            try
+            {
+                operation = await ContentGitApi.GetOperationInProgressAsync();
+                foreach (var package in packages)
+                {
+                    var stagingEntry    = staging?.Find(package);
+                    var productionEntry = production?.Find(package);
+                    var sync = new PackageSync
+                    {
+                        Staging = await ContentSyncApi.GetDeployStatusAsync(package, stagingEntry, platform),
+                    };
+                    sync.Production = IsSameBuild(stagingEntry, productionEntry, platform)
+                        ? sync.Staging
+                        : await ContentSyncApi.GetDeployStatusAsync(package, productionEntry, platform);
+                    if (checkedOut.Contains(package))
+                        sync.Unpulled = await ContentSyncApi.GetUnpulledCommitsAsync(package);
+                    result[package] = sync;
+                }
+            }
+            catch (Exception ex) { Debug.LogWarning($"[ContentRepo] Could not compare the deployed builds with the content repository: {ex.Message}"); }
+
+            if (version != syncVersion) return;
+            packageSync = result;
+            operationInProgress = operation;
+        }
+
+        private static bool IsSameBuild(ContentManifestEntry a, ContentManifestEntry b, string platform)
+        {
+            var x = a?.FindPlatform(platform);
+            var y = b?.FindPlatform(platform);
+            return x != null && y != null && a.gitSha == b.gitSha && x.buildId == y.buildId
+                && x.sourceSha == y.sourceSha && x.sourceTree == y.sourceTree && x.sourceDirty == y.sourceDirty;
         }
 
         private async Task RefreshStackStatusAsync()
@@ -443,6 +503,15 @@ namespace ContentRepo.Editor
         private void Rebuild()
         {
             setupBanner.style.display = isInitialized == false ? DisplayStyle.Flex : DisplayStyle.None;
+            operationBanner.style.display = operationInProgress != null ? DisplayStyle.Flex : DisplayStyle.None;
+            if (operationInProgress != null)
+            {
+                operationLabel.text =
+                    $"The content repository is in the middle of a {operationInProgress}, usually because a pull hit a conflict. " +
+                    "The changes shown on the packages include other people's incoming work, so do not discard them. " +
+                    $"Resolve the conflict in your git client and commit, or abort to return to the state before the {operationInProgress}.";
+                abortOperationBtn.text = $"Abort {operationInProgress}";
+            }
             rowUpdaters.Clear();
             folderList.Clear();
             if (isInitialized != true) return;
@@ -488,7 +557,7 @@ namespace ContentRepo.Editor
             {
                 var checkoutBtn = new Button(() => _ = RunAsync($"Checking out '{pkg}'…", () => ContentGitApi.CheckOutFolderAsync(pkg)));
                 checkoutBtn.AddToClassList("cs-icon-btn");
-                checkoutBtn.AddToClassList("cs-icon-btn--muted");
+                checkoutBtn.AddToClassList("cs-checkout-btn");
                 checkoutBtn.tooltip = $"Check out '{pkg}'";
                 var checkoutImg = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon("folder-down") };
                 checkoutImg.AddToClassList("cs-icon-image");
@@ -541,10 +610,7 @@ namespace ContentRepo.Editor
 
             var promoteReady = stgId != null && stgId != prdId;
 
-            var stagingBadge = MakeLiveBadge("staging", stgId);
-            if (stagingBadge != null) row.Add(stagingBadge);
-            var prodBadge = MakeProdBadge(prdId);
-            if (prodBadge != null) row.Add(prodBadge);
+            AddSyncBadges(row, pkg, stgId, prdId);
 
             row.Add(new VisualElement { style = { flexGrow = 1 } });
 
@@ -553,14 +619,7 @@ namespace ContentRepo.Editor
 
             if (promoteReady)
             {
-                var promoteBtn = new Button(() =>
-                {
-                    if (EditorUtility.DisplayDialog("Promote",
-                        $"Promote '{pkg}' from {staging} → {production}?", "Promote", "Cancel"))
-                        _ = RunPipelineAsync($"Promoting '{pkg}'…",
-                            async () => { await ContentUploadApi.PromoteContentPackageAsync(pkg, staging, production, AppendDeployLog); await RefreshManifestsAsync(); },
-                            deployLog);
-                });
+                var promoteBtn = new Button(() => _ = PromoteAsync(pkg));
                 promoteBtn.AddToClassList("cs-icon-btn");
                 promoteBtn.AddToClassList("cs-icon-btn--muted");
                 promoteBtn.tooltip = $"Promote '{pkg}' to production\n{stgId}";
@@ -782,13 +841,7 @@ namespace ContentRepo.Editor
             {
                 latestStatus = s;
                 ApplyBadgeState(badge, isCheckedOut, s);
-                if (stagingManifest != null || productionManifest != null)
-                {
-                    var stagBadge = MakeLiveBadge("staging", stgId);
-                    if (stagBadge != null) badge.Add(stagBadge);
-                    var prodBadge = MakeProdBadge(prdId);
-                    if (prodBadge != null) badge.Add(prodBadge);
-                }
+                AddSyncBadges(badge, folder, stgId, prdId);
                 var dirty               = isCheckedOut && !s.IsClean;
                 pullBtn.style.display       = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
                 pushBtn.style.display       = dirty ? DisplayStyle.Flex : DisplayStyle.None;
@@ -867,7 +920,7 @@ namespace ContentRepo.Editor
                     });
                 }
                 menu.AddItem(new GUIContent("Build and Deploy"), false, () =>
-                    _ = RunPipelineAsync($"Build and Deploy '{folder}'…",
+                    _ = RunBuildAsync(new[] { folder }, $"Build and Deploy '{folder}'…",
                         async () =>
                         {
                             var statusLbl = row.Q<Label>(null, "cs-pipeline-status");
@@ -880,7 +933,7 @@ namespace ContentRepo.Editor
                             }
                             catch { SetPipelineStatus(statusLbl, "err"); throw; }
                             finally { await RefreshManifestsAsync(); }
-                        }, deployLog));
+                        }));
                 if (stgId != null)
                 {
                     menu.AddSeparator("");
@@ -930,16 +983,7 @@ namespace ContentRepo.Editor
             deployStatus.style.display = DisplayStyle.None;
             rowBody.Insert(moreBtnIndex, deployStatus);   // inserted 1st → ends up rightmost
 
-            var staging2    = ContentUploadSettings.instance.StagingPrefix;
-            var production2 = ContentUploadSettings.instance.ProductionPrefix;
-            var promoteBtn = new Button(() =>
-            {
-                if (!EditorUtility.DisplayDialog("Promote",
-                    $"Promote '{folder}' from {staging2} → {production2}?", "Promote", "Cancel")) return;
-                _ = RunPipelineAsync($"Promoting '{folder}'…",
-                    async () => { await ContentUploadApi.PromoteContentPackageAsync(folder, staging2, production2, AppendDeployLog); await RefreshManifestsAsync(); },
-                    deployLog);
-            });
+            var promoteBtn = new Button(() => _ = PromoteAsync(folder));
             promoteBtn.AddToClassList("cs-icon-btn");
             promoteBtn.AddToClassList("cs-icon-btn--lg");
             promoteBtn.tooltip = $"Promote '{folder}' to production\n{stgId}";
@@ -966,13 +1010,13 @@ namespace ContentRepo.Editor
             uploadBtn.Add(uploadImg);
             rowBody.Insert(moreBtnIndex, uploadBtn);      // inserted 3rd → ends up left of promote
 
-            var buildBtn = new Button(() => _ = RunPipelineAsync($"Building '{folder}'…",
+            var buildBtn = new Button(() => _ = RunBuildAsync(new[] { folder }, $"Building '{folder}'…",
                 async () =>
                 {
                     SetPipelineStatus(deployStatus, "running");
                     try   { await ContentBuildApi.BuildContentPackageAsync(folder, AppendDeployLog); SetPipelineStatus(deployStatus, "ok"); Rebuild(); }
                     catch { SetPipelineStatus(deployStatus, "err"); throw; }
-                }, deployLog));
+                }));
             buildBtn.AddToClassList("cs-icon-btn");
             buildBtn.AddToClassList("cs-icon-btn--lg");
             buildBtn.tooltip = $"Build '{folder}'";
@@ -1029,24 +1073,61 @@ namespace ContentRepo.Editor
             return l;
         }
 
-        private static Label MakeLiveBadge(string env, string buildId)
+        private void AddSyncBadges(VisualElement group, string package, string stagingBuildId, string productionBuildId)
         {
-            if (buildId == null) return null;
-            var l = new Label($"{env}: {buildId[..Math.Min(8, buildId.Length)]}")
-                { tooltip = $"Live on {env}\n{buildId}" };
-            l.AddToClassList("cs-badge");
-            l.AddToClassList("cs-badge--stg");
-            return l;
+            packageSync.TryGetValue(package, out var sync);
+            if (sync != null && sync.Unpulled.Count > 0)
+                group.Add(MakeBadge($"{sync.Unpulled.Count} to pull", "cs-badge--sync-warn",
+                    "Commits on the remote that are not pulled yet:\n  " + string.Join("\n  ", sync.Unpulled.Take(8)) +
+                    "\nA build made now will not contain them."));
+            if (stagingBuildId != null)
+                group.Add(MakeDeployBadge("staging", stagingBuildId, sync?.Staging, "cs-badge--stg"));
+            if (productionBuildId != null)
+                group.Add(MakeDeployBadge("production", productionBuildId, sync?.Production, "cs-badge--prod"));
         }
 
-        private static Label MakeProdBadge(string prdId)
+        private static VisualElement MakeDeployBadge(string environment, string buildId, ContentDeployStatus status, string environmentClass)
         {
-            if (prdId == null) return null;
-            var l = new Label($"production: {prdId[..Math.Min(8, prdId.Length)]}")
-                { tooltip = $"Live on production\n{prdId}" };
-            l.AddToClassList("cs-badge");
-            l.AddToClassList("cs-badge--prod");
-            return l;
+            var text       = $"{environment}: {buildId[..Math.Min(8, buildId.Length)]}";
+            var stateClass = environmentClass;
+            string icon    = null;
+            switch (status?.State)
+            {
+                case ContentSyncState.InSync when status.Verified:
+                    icon = "circle-check";
+                    break;
+                case ContentSyncState.Behind:
+                    icon = "triangle-alert";
+                    text += $" · {status.NewerCommits.Count} behind";
+                    stateClass = "cs-badge--sync-warn";
+                    break;
+                case ContentSyncState.NotInRepository:
+                    icon = "triangle-alert";
+                    text += " · not in repo";
+                    stateClass = "cs-badge--sync-warn";
+                    break;
+                case ContentSyncState.Unknown:
+                    icon = "triangle-alert";
+                    text += " · unverified";
+                    stateClass = "cs-badge--sync-warn";
+                    break;
+            }
+
+            var badge = new VisualElement
+            {
+                tooltip = status != null ? ContentSyncApi.Describe(environment, status) : $"Live on {environment}\n{buildId}",
+            };
+            badge.AddToClassList("cs-badge");
+            badge.AddToClassList("cs-deploy-badge");
+            badge.AddToClassList(stateClass);
+            badge.Add(new Label(text) { pickingMode = PickingMode.Ignore });
+            if (icon != null)
+            {
+                var image = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon(icon) };
+                image.AddToClassList("cs-deploy-badge-icon");
+                badge.Add(image);
+            }
+            return badge;
         }
 
         // ── Async runners ─────────────────────────────────────────────────────
@@ -1062,6 +1143,7 @@ namespace ContentRepo.Editor
             {
                 SetStatus("Refreshing…");
                 await RefreshDataAsync();
+                await RefreshSyncAsync();
                 Rebuild();
                 UpdateToolbarVisibility();
                 SetStatus(!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready");
@@ -1078,6 +1160,105 @@ namespace ContentRepo.Editor
             try   { await op(); SetStatus("Done."); }
             catch (Exception ex) { SetStatus($"Error: {ex.Message}"); AppendLog(log, $"ERROR: {ex.Message}"); Debug.LogException(ex); }
             finally { Rebuild(); SetBusy(false); }
+        }
+
+        private async Task RunBuildAsync(IReadOnlyList<string> packages, string statusMessage, Func<Task> op)
+        {
+            if (busy) return;
+            if (!await ConfirmBuildAsync(packages))
+            {
+                SetStatus("Ready");
+                return;
+            }
+            await RunPipelineAsync(statusMessage, op, deployLog);
+        }
+
+        private async Task<bool> ConfirmBuildAsync(IReadOnlyList<string> packages)
+        {
+            var behind = new List<string>();
+            string operation;
+            SetBusy(true, "Checking the content repository for newer commits…");
+            try
+            {
+                await ContentSyncApi.FetchAsync();
+                operation = await ContentGitApi.GetOperationInProgressAsync();
+                foreach (var package in packages)
+                {
+                    var commits = await ContentSyncApi.GetUnpulledCommitsAsync(package);
+                    if (commits.Count == 0) continue;
+                    behind.Add($"'{package}' has {(commits.Count == 1 ? "1 commit" : $"{commits.Count} commits")} on the remote that you have not pulled:\n  " +
+                               string.Join("\n  ", commits.Take(8)));
+                }
+            }
+            finally { SetBusy(false); }
+
+            if (operation != null)
+            {
+                EditorUtility.DisplayDialog("Build",
+                    $"The content repository is in the middle of a {operation}. Finish or abort it before building.", "OK");
+                return false;
+            }
+            return behind.Count == 0 || EditorUtility.DisplayDialog("Newer commits are not pulled",
+                string.Join("\n\n", behind) + "\n\nA build made now will not contain them. Pull first, or build anyway?",
+                "Build anyway", "Cancel");
+        }
+
+        /// <summary>Promotes one package, or every checked-out package when <paramref name="package"/> is null.</summary>
+        private async Task PromoteAsync(string package)
+        {
+            if (busy) return;
+            var staging    = ContentUploadSettings.instance.StagingPrefix;
+            var production = ContentUploadSettings.instance.ProductionPrefix;
+            var platform   = EditorUserBuildSettings.activeBuildTarget.ToString();
+
+            SetBusy(true, "Comparing staging with the content repository…");
+            try
+            {
+                await ContentSyncApi.FetchAsync();
+                stagingManifest    = await ContentUploadApi.GetManifestAsync(staging) ?? stagingManifest;
+                productionManifest = await ContentUploadApi.GetManifestAsync(production) ?? productionManifest;
+                await RefreshSyncAsync();
+            }
+            finally { SetBusy(false); }
+
+            var candidates = package != null
+                ? new List<string> { package }
+                : checkedOutFolders.Where(p =>
+                {
+                    var stagingId = stagingManifest?.Find(p)?.FindPlatform(platform)?.buildId;
+                    return stagingId != null && stagingId != productionManifest?.Find(p)?.FindPlatform(platform)?.buildId;
+                }).ToList();
+            var warnings = candidates
+                .Where(p => packageSync.TryGetValue(p, out var sync) && sync.Staging != null && sync.Staging.NeedsAttention)
+                .Select(p => $"'{p}' on {staging}: {ContentSyncApi.DescribeState(packageSync[p].Staging)}")
+                .ToList();
+
+            var subject = package != null ? $"'{package}'" : "all checked-out packages";
+            var confirmed = warnings.Count > 0
+                ? EditorUtility.DisplayDialog($"{staging} does not match the content repository",
+                    string.Join("\n\n", warnings) + $"\n\nPromote {subject} from {staging} → {production} anyway?",
+                    "Promote anyway", "Cancel")
+                : package != null
+                    ? EditorUtility.DisplayDialog("Promote", $"Promote '{package}' from {staging} → {production}?", "Promote", "Cancel")
+                    : EditorUtility.DisplayDialog("Promote all to production",
+                        $"Promote all checked-out packages from {staging} → {production}?\nOnly the manifest is updated — no files move.",
+                        "Promote", "Cancel");
+            if (!confirmed)
+            {
+                SetStatus("Ready");
+                Rebuild();
+                return;
+            }
+
+            if (warnings.Count > 0)
+                AppendDeployLog($"[Promote] WARNING: promoting although {staging} does not match the content repository:\n{string.Join("\n", warnings)}");
+            await RunPipelineAsync(package != null ? $"Promoting '{package}'…" : "Promoting all → production…",
+                async () =>
+                {
+                    if (package != null) await ContentUploadApi.PromoteContentPackageAsync(package, staging, production, AppendDeployLog);
+                    else await ContentUploadApi.PromoteAllAsync(staging, production, AppendDeployLog);
+                    await RefreshManifestsAsync();
+                }, deployLog);
         }
 
         private async Task PollStatusesAsync()
@@ -1220,6 +1401,13 @@ namespace ContentRepo.Editor
         // ── Utilities ─────────────────────────────────────────────────────────
 
         private string StagingKey() => ContentUploadSettings.instance.StagingPrefix;
+
+        private sealed class PackageSync
+        {
+            public ContentDeployStatus Staging;
+            public ContentDeployStatus Production;
+            public List<ContentCommit> Unpulled = new();
+        }
 
         private static Texture2D LoadIcon(string name) =>
             AssetDatabase.LoadAssetAtPath<Texture2D>($"{PackageRoot}/Editor/UI/Icons/{name}.png");

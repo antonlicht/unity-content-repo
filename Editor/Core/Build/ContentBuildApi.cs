@@ -26,6 +26,8 @@ namespace ContentRepo.Editor
         public bool Success;
         public string ErrorMessage;
         public string GitSha;
+        public string SourceTree;
+        public bool SourceDirty;
     }
 
     // Written alongside every build so cross-session upload can locate artifacts.
@@ -39,6 +41,8 @@ namespace ContentRepo.Editor
         public string gitSha;
         public string unityVersion;
         public string builtAt;
+        public string sourceTree;
+        public bool sourceDirty;
 
         public string ToJson() => JsonUtility.ToJson(this, true);
 
@@ -73,6 +77,57 @@ namespace ContentRepo.Editor
             LastResults.TryGetValue(contentPackageName, out var r) ? r : null;
 
         public static async Task<ContentBuildResult> BuildContentPackageAsync(
+            string contentPackageName, BuildLogHandler log = null)
+        {
+            ContentBuildResult result = null;
+            try
+            {
+                result = await BuildPackageAsync(contentPackageName, log);
+                await StampSourceAsync(result, log);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                result ??= new ContentBuildResult
+                {
+                    ContentPackageName = contentPackageName,
+                    Platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
+                    Generation = ContentRepoGenerationSettings.instance.Generation,
+                    Success = false,
+                    ErrorMessage = ex.Message,
+                };
+                throw;
+            }
+            finally
+            {
+                try { OnBuildComplete?.Invoke(result); }
+                catch (Exception ex) { Debug.LogException(ex); }
+            }
+        }
+
+        /// <summary>
+        /// Records which files the build was made from, once the build has put the group files back: the
+        /// fingerprint then matches what a commit of the package right after the build contains.
+        /// </summary>
+        private static async Task StampSourceAsync(ContentBuildResult result, BuildLogHandler log)
+        {
+            var source = await ContentSyncApi.GetWorkingSourceAsync(result.ContentPackageName);
+            result.SourceTree = source.Tree;
+            result.SourceDirty = source.Dirty;
+
+            var meta = ReadMetadata(result.ArtifactPath);
+            if (meta != null)
+            {
+                meta.sourceTree = source.Tree ?? "";
+                meta.sourceDirty = source.Dirty;
+                File.WriteAllText(Path.Combine(result.ArtifactPath, "build-metadata.json"), meta.ToJson());
+            }
+
+            if (source.Dirty)
+                log?.Invoke($"[Build] '{result.ContentPackageName}' was built from local changes that are not committed. Commit and push them before promoting this build.");
+        }
+
+        private static async Task<ContentBuildResult> BuildPackageAsync(
             string contentPackageName, BuildLogHandler log = null)
         {
             ValidatePackageName(contentPackageName);
@@ -292,14 +347,6 @@ namespace ContentRepo.Editor
             }
             catch (Exception ex)
             {
-                result = new ContentBuildResult
-                {
-                    ContentPackageName = contentPackageName,
-                    Platform = EditorUserBuildSettings.activeBuildTarget.ToString(),
-                    Generation = generation,
-                    Success = false,
-                    ErrorMessage = ex.Message,
-                };
                 log?.Invoke($"[Build] FAILED: {ex.Message}");
                 throw;
             }
@@ -335,9 +382,6 @@ namespace ContentRepo.Editor
                 ContentAssetSaving.SaveGroup(tempGroup);
                 foreach (var group in disabledStates.Keys) ContentAssetSaving.SaveGroup(group);
                 ContentAssetSaving.SaveSettingsIfChanged(settings, settingsFingerprint, settingsWasDirty);
-
-                try { OnBuildComplete?.Invoke(result); }
-                catch (Exception ex) { Debug.LogException(ex); }
             }
         }
 

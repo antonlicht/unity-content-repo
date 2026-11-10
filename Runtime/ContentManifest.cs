@@ -10,6 +10,10 @@ namespace ContentRepo
         public string platform;
         public string catalogUrl;
         public string buildId;
+        public string sourceSha;
+        public string sourceTree;
+        public bool sourceDirty;
+        public string builtAt;
     }
 
     [Serializable]
@@ -33,6 +37,10 @@ namespace ContentRepo
             if (existing == null) { platforms.Add(entry); return; }
             existing.catalogUrl = entry.catalogUrl;
             existing.buildId = entry.buildId;
+            existing.sourceSha = entry.sourceSha;
+            existing.sourceTree = entry.sourceTree;
+            existing.sourceDirty = entry.sourceDirty;
+            existing.builtAt = entry.builtAt;
         }
     }
 

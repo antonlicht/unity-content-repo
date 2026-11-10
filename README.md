@@ -80,11 +80,31 @@ Status badges per row:
 | `+K` | K untracked files |
 | `M` | M modified/staged files |
 | `-D` | D deleted files |
+| `N to pull` | N commits on the remote touch this package and are not pulled yet |
 | `staging: <id>` | Build ID currently live on staging (first 8 chars) |
 | `production: <id>` | Build ID currently live on production (first 8 chars) |
 
+The staging and production badges also say how that build relates to the content repository, for every
+package, checked out or not. Hover a badge for the build's source commit and the commits it is missing.
+
+| Badge state | Meaning |
+|---|---|
+| check mark | The build was made from exactly the files that are in the repository |
+| `N behind` (amber) | N newer commits in the repository are not in the build: pull, build and upload |
+| `not in repo` (amber) | The build contains changes that were never committed or pushed |
+| `unverified` (amber) | The build's source commit is not on the remote, so it cannot be compared |
+| no mark | A build made before 0.5.0: no newer commits, but local changes in it cannot be ruled out |
+
+Every build records a fingerprint of the files it was made from. A build made from uncommitted files
+turns into a check mark as soon as exactly those files are committed and pushed; no rebuild is needed.
+
 When staging is ahead of production, the per-row **Promote** button (and the toolbar **Promote all**)
-becomes visible.
+becomes visible. Promote warns and lists the missing commits when staging does not match the
+repository, and Build warns when the package has commits on the remote that are not pulled yet.
+
+If a pull hits a conflict, git stays in the middle of a merge and the incoming changes of other people
+show up as local changes. The window then shows a banner with an **Abort** button, and commit, discard
+and the index repair are blocked until the merge is finished in a git client or aborted.
 
 See **[Documentation/Pipeline-Usage.md](Documentation/Pipeline-Usage.md)** for the full build, upload,
 promote, and local-dev-override workflow.

@@ -72,9 +72,16 @@ namespace ContentRepo.Editor
                             platform = platform,
                             catalogUrl = catalogUrl,
                             buildId = buildId,
+                            sourceSha = meta.gitSha ?? "",
+                            sourceTree = meta.sourceTree ?? "",
+                            sourceDirty = meta.sourceDirty,
+                            builtAt = meta.builtAt ?? "",
                         }
                     }
                 };
+                if (meta.sourceDirty)
+                    log?.Invoke($"[Upload] '{contentPackageName}' was built from local changes that are not committed. Commit and push them before promoting this build.");
+
                 // Capture the build this environment currently points at (before we overwrite it), so a
                 // staging upload can prune the now-superseded bundles below.
                 string previousBuildId = null;
@@ -349,6 +356,10 @@ namespace ContentRepo.Editor
                             platform = lastResult.Platform,
                             catalogUrl = catalogUrl,
                             buildId = lastResult.BuildId,
+                            sourceSha = lastResult.GitSha ?? "",
+                            sourceTree = lastResult.SourceTree ?? "",
+                            sourceDirty = lastResult.SourceDirty,
+                            builtAt = ContentBuildApi.ReadMetadata(lastResult.ArtifactPath)?.builtAt ?? "",
                         }
                     }
                 };

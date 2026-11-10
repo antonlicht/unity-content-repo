@@ -864,6 +864,7 @@ namespace ContentRepo.Editor
             ValidateFolderName(folder);
             if (string.IsNullOrWhiteSpace(commitMessage))
                 throw new ArgumentException("Commit message cannot be empty.", nameof(commitMessage));
+            await ThrowIfOperationInProgressAsync("commit");
 
             // Defensive: if any of the folder's files still carry the skip-worktree bit, `git add`
             // silently skips them and the commit would omit real changes (e.g. edited data assets,
@@ -905,6 +906,7 @@ namespace ContentRepo.Editor
         public static async Task DiscardFilesAsync(IEnumerable<string> repoPaths, IEnumerable<ChangeKind> kinds)
         {
             var pairs = repoPaths.Zip(kinds, (p, k) => (p, k)).ToList();
+            await ThrowIfOperationInProgressAsync("discard changes");
             var toRestore = pairs.Where(x => x.k != ChangeKind.Added).Select(x => x.p).ToList();
             var toDelete  = pairs.Where(x => x.k == ChangeKind.Added).Select(x => x.p).ToList();
 
@@ -927,6 +929,7 @@ namespace ContentRepo.Editor
         {
             var basePath = ContentAbsolutePath;          // evaluate on main thread
             var paths    = repoPaths.ToList();           // materialise on main thread
+            await ThrowIfOperationInProgressAsync("delete files");
             await Task.Run(() =>
             {
                 foreach (var rel in paths)
@@ -1126,7 +1129,8 @@ namespace ContentRepo.Editor
             return string.Join(", ", parts);
         }
 
-        public static Task<string> RunGitCommandAsync(string args, string workingDir = null, bool silent = true)
+        public static Task<string> RunGitCommandAsync(string args, string workingDir = null, bool silent = true,
+            IReadOnlyDictionary<string, string> environment = null)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -1140,6 +1144,9 @@ namespace ContentRepo.Editor
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+            if (environment != null)
+                foreach (var pair in environment)
+                    startInfo.EnvironmentVariables[pair.Key] = pair.Value;
 
             if (!silent)
                 UnityEngine.Debug.Log($"[ContentRepo] > git {args}  (in {startInfo.WorkingDirectory})");
@@ -1242,9 +1249,55 @@ namespace ContentRepo.Editor
         {
             if (initializing) return false;
             await EnsurePartialCloneAsync();
+            if (await GetOperationInProgressAsync() != null) return false;
             var repaired = await RepairIndexCoreAsync();
             if (await RestoreHiddenSharedFilesAsync()) repaired = true;
             return repaired;
+        }
+
+        /// <summary>
+        /// "merge", "rebase", "cherry-pick" or "revert" while git is in the middle of one (typically a pull that
+        /// hit a conflict), otherwise null. In that state the index holds other people's incoming changes: they
+        /// show up as local changes, and rebuilding the index or discarding them would throw that work away.
+        /// </summary>
+        public static async Task<string> GetOperationInProgressAsync()
+        {
+            string gitDir;
+            try { gitDir = (await RunGitCommandAsync("rev-parse --absolute-git-dir", ContentAbsolutePath)).Trim(); }
+            catch { return null; }
+            if (File.Exists(Path.Combine(gitDir, "MERGE_HEAD"))) return "merge";
+            if (Directory.Exists(Path.Combine(gitDir, "rebase-merge")) || Directory.Exists(Path.Combine(gitDir, "rebase-apply"))) return "rebase";
+            if (File.Exists(Path.Combine(gitDir, "CHERRY_PICK_HEAD"))) return "cherry-pick";
+            if (File.Exists(Path.Combine(gitDir, "REVERT_HEAD"))) return "revert";
+            return null;
+        }
+
+        /// <summary>Aborts the merge, rebase, cherry-pick or revert in progress and returns to the state before it.</summary>
+        public static async Task AbortOperationAsync()
+        {
+            var operation = await GetOperationInProgressAsync();
+            if (operation == null) return;
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                await RunGitCommandAsync($"{operation} --abort", ContentAbsolutePath);
+            }
+            finally
+            {
+                ContentGroupRegistry.UnregisterMissing();
+                AssetDatabase.StopAssetEditing();
+                NotifyChange();
+                AssetDatabase.Refresh();
+            }
+        }
+
+        private static async Task ThrowIfOperationInProgressAsync(string action)
+        {
+            var operation = await GetOperationInProgressAsync();
+            if (operation != null)
+                throw new InvalidOperationException(
+                    $"The content repository is in the middle of a {operation}. Finish or abort it before you {action}: " +
+                    "the changes shown include other people's incoming work.");
         }
 
         private const string LegacyMetasMigratedKey = "contentrepo.legacyDisconnectMigrated";
@@ -1421,6 +1474,9 @@ namespace ContentRepo.Editor
                     yield return $"{GroupsFolderName}/{name}";
             }
         }
+
+        internal static List<string> GetGroupFileNamesOnDisk(string folder) =>
+            GetGroupRelativePaths(folder).Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal).ToList();
 
         private static readonly System.Text.RegularExpressions.Regex GroupFilePattern =
             new System.Text.RegularExpressions.Regex(

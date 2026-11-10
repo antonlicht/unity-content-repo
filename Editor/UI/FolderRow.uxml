@@ -8,7 +8,7 @@
                 <ui:Image name="img-disconnect" class="cs-icon-image" picking-mode="Ignore" />
             </ui:Button>
 
-            <ui:Button name="btn-checkout" class="cs-icon-btn" tooltip="Check out this folder">
+            <ui:Button name="btn-checkout" class="cs-icon-btn cs-checkout-btn" tooltip="Check out this folder">
                 <ui:Image name="img-checkout" class="cs-icon-image" picking-mode="Ignore" />
             </ui:Button>
 
