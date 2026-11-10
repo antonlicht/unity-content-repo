@@ -1126,7 +1126,7 @@ namespace ContentRepo.Editor
             badge.Add(new Label(text) { pickingMode = PickingMode.Ignore });
             if (icon != null)
             {
-                var image = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon(icon) };
+                var image = new Image { pickingMode = PickingMode.Ignore, image = LoadIcon(icon), scaleMode = ScaleMode.StretchToFill };
                 image.AddToClassList("cs-deploy-badge-icon");
                 badge.Add(image);
             }

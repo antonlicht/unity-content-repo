@@ -453,9 +453,9 @@
 }
 
 .cs-deploy-badge-icon {
-    width: 10px;
-    height: 10px;
-    margin-left: 4px;
+    width: 12px;
+    height: 12px;
+    margin-left: 3px;
     flex-shrink: 0;
 }
 
