@@ -76,8 +76,17 @@ retention cleanup stop with an error; a promote to production stops before produ
 delete-schedule cannot be read, and once production is updated, a later failure to update the schedule
 only logs a warning (the superseded build then stays on S3 unscheduled).
 This relies on the `s3:ListBucket` permission from [Setup-AWS.md](Setup-AWS.md), without which S3 reports
-a missing file as "access denied". The cleanup Lambda template stops the same way on a manifest it cannot
-read (this takes effect when the stack is redeployed). Promoting to production removes any old
+a missing file as "access denied". The cleanup Lambda stops the same way on a manifest it cannot read.
+
+**Retention cleanup.** Promoting to production schedules the build it replaces in
+`<generation>/delete-schedule.json` for deletion after the retention window (30 days by default). The
+cleanup Lambda, deployed with **Deploy cleanup Lambda** in the Infrastructure section (or
+`DeployCleanupLambdaCLI`), runs once a day: it finds every `delete-schedule.json` in the bucket and
+deletes each due build that neither the staging nor the production manifest references. A generation
+whose schedule or manifest cannot be read is skipped that day; entries it cannot understand are kept.
+Redeploy it after updating this package so it runs the current template. Stacks deployed from an older
+template (one without the `StagingPrefix` and `ProductionPrefix` parameters) never found the `gen/1`
+schedule and deleted nothing. Promoting to production removes any old
 delete-schedule entry of the builds that are live afterwards, and scheduling a build that already has an
 entry moves its date forward, so a build that went live again gets the full retention window when it is
 superseded.

@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Content Repo — daily cleanup Lambda.
-  Reads delete-schedule.json from each generation prefix, deletes build folders whose
-  deleteAfter date has passed and which are no longer referenced by any manifest,
-  then updates the schedule file. Runs once per day via EventBridge.
+  Reads every <generation>/delete-schedule.json in the bucket, deletes build folders whose
+  deleteAfter date has passed and which are no longer referenced by the staging or production
+  manifest, then updates the schedule file. Runs once per day via EventBridge.
 
 Parameters:
   BucketName:
@@ -12,6 +12,14 @@ Parameters:
   Region:
     Type: String
     Description: AWS region where the bucket lives (Lambda must be in the same region).
+  StagingPrefix:
+    Type: String
+    Default: staging
+    Description: Folder of the staging manifest inside each generation (<generation>/<prefix>/manifest.json).
+  ProductionPrefix:
+    Type: String
+    Default: production
+    Description: Folder of the production manifest inside each generation (<generation>/<prefix>/manifest.json).
 
 Resources:
 
@@ -55,6 +63,8 @@ Resources:
       Environment:
         Variables:
           BUCKET_NAME: !Ref BucketName
+          STAGING_PREFIX: !Ref StagingPrefix
+          PRODUCTION_PREFIX: !Ref ProductionPrefix
       Code:
         ZipFile: |
           import boto3
@@ -64,96 +74,80 @@ Resources:
 
           s3 = boto3.client("s3")
           BUCKET = os.environ["BUCKET_NAME"]
+          MANIFESTS = [os.environ.get("STAGING_PREFIX", "staging"), os.environ.get("PRODUCTION_PREFIX", "production")]
+          SUFFIX = "/delete-schedule.json"
+
+          def read_json(key):
+              return json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8"))
 
           def handler(event, context):
-              # Discover all generations by listing top-level prefixes.
-              resp = s3.list_objects_v2(Bucket=BUCKET, Delimiter="/")
-              generations = [p["Prefix"].rstrip("/") for p in resp.get("CommonPrefixes", [])]
-
-              for gen in generations:
-                  process_generation(gen)
-
-          def process_generation(gen):
-              schedule_key = f"{gen}/delete-schedule.json"
-
-              try:
-                  obj = s3.get_object(Bucket=BUCKET, Key=schedule_key)
-                  schedule = json.loads(obj["Body"].read().decode("utf-8"))
-              except s3.exceptions.NoSuchKey:
-                  return
-              except Exception as e:
-                  print(f"[{gen}] Could not read schedule: {e}")
-                  return
-
-              # Load both manifests to check for live references.
-              # A missing manifest references nothing. One that cannot be read or parsed stops the cleanup of this
-              # generation: deleting without knowing what is live could remove bundles production still serves.
-              live_build_ids = set()
-              for env_suffix in ["staging/manifest.json", "production/manifest.json"]:
+              # Every folder with a delete-schedule.json is a generation (the default one is "gen/1").
+              gens = []
+              for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET):
+                  for obj in page.get("Contents", []):
+                      key = obj["Key"]
+                      if key.endswith(SUFFIX) and "/builds/" not in key:
+                          gens.append(key[:-len(SUFFIX)])
+              print(f"Generations: {gens}")
+              for gen in gens:
                   try:
-                      obj = s3.get_object(Bucket=BUCKET, Key=f"{gen}/{env_suffix}")
-                      manifest = json.loads(obj["Body"].read().decode("utf-8"))
+                      process(gen)
+                  except Exception as e:
+                      print(f"[{gen}] Failed: {e}")
+
+          def is_due(e, now):
+              try:
+                  d = datetime.fromisoformat(str(e.get("deleteAfter") or "").replace("Z", "+00:00"))
+              except ValueError:
+                  return False
+              return now >= (d if d.tzinfo else d.replace(tzinfo=timezone.utc))
+
+          def process(gen):
+              key = gen + SUFFIX
+              schedule = read_json(key)
+              entries = schedule.get("entries") or []
+
+              # A missing manifest references nothing; one that cannot be read stops this generation.
+              live = set()
+              for env in MANIFESTS:
+                  try:
+                      manifest = read_json(f"{gen}/{env}/manifest.json")
                   except s3.exceptions.NoSuchKey:
                       continue
-                  except Exception as e:
-                      print(f"[{gen}] Could not read {env_suffix}, skipping cleanup: {e}")
-                      return
-                  for pkg in manifest.get("contentPackages", []):
-                      for plat in pkg.get("platforms", []):
-                          bid = plat.get("buildId", "")
-                          if bid:
-                              live_build_ids.add(bid)
+                  for pkg in manifest.get("contentPackages") or []:
+                      for plat in (pkg or {}).get("platforms") or []:
+                          live.add((plat or {}).get("buildId", ""))
 
               now = datetime.now(timezone.utc)
-              surviving = []
-
-              for entry in schedule.get("entries", []):
-                  build_id = entry.get("buildId", "")
-                  delete_after_str = entry.get("deleteAfter", "")
-
-                  if not build_id or not delete_after_str:
+              removed = set()
+              for e in entries:
+                  bid = e.get("buildId", "") if isinstance(e, dict) else ""
+                  if not bid or bid in live or not is_due(e, now):
                       continue
+                  prefix = f"{gen}/builds/{bid}/{e.get('platform', '')}/{e.get('contentPackage', '')}/"
+                  deleted, failed = delete_prefix(prefix)
+                  print(f"[{gen}] Deleted {deleted} object(s) from {prefix}, {failed} failed")
+                  if not failed:
+                      removed.add(bid)
 
-                  try:
-                      delete_after = datetime.fromisoformat(delete_after_str.replace("Z", "+00:00"))
-                  except ValueError:
-                      surviving.append(entry)
-                      continue
-
-                  if now < delete_after:
-                      surviving.append(entry)
-                      continue
-
-                  if build_id in live_build_ids:
-                      print(f"[{gen}] Skipping {build_id} — still referenced by a manifest.")
-                      surviving.append(entry)
-                      continue
-
-                  # Delete the build prefix.
-                  platform = entry.get("platform", "")
-                  pkg = entry.get("contentPackage", "")
-                  prefix = f"{gen}/builds/{build_id}/{platform}/{pkg}/"
-                  deleted = delete_prefix(prefix)
-                  print(f"[{gen}] Deleted {deleted} object(s) from {prefix}")
-
-              # Write back the surviving entries.
-              schedule["entries"] = surviving
-              s3.put_object(
-                  Bucket=BUCKET,
-                  Key=schedule_key,
-                  Body=json.dumps(schedule, indent=2).encode("utf-8"),
-                  ContentType="application/json",
-              )
+              # Re-read right before writing and drop only what was deleted, so entries added meanwhile are kept.
+              if removed:
+                  fresh = read_json(key)
+                  fresh["entries"] = [e for e in fresh.get("entries") or [] if not (isinstance(e, dict) and e.get("buildId") in removed)]
+                  s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(fresh, indent=2).encode("utf-8"),
+                                ContentType="application/json")
 
           def delete_prefix(prefix):
-              paginator = s3.get_paginator("list_objects_v2")
-              deleted = 0
-              for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
-                  objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-                  if objects:
-                      s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objects})
-                      deleted += len(objects)
-              return deleted
+              deleted = failed = 0
+              for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
+                  objs = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                  if objs:
+                      errors = s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objs}).get("Errors", [])
+                      for err in errors:
+                          print(f"  {err.get('Key')}: {err.get('Code')}")
+                      failed += len(errors)
+                      deleted += len(objs) - len(errors)
+              return deleted, failed
 
   CleanupSchedule:
     Type: AWS::Events::Rule

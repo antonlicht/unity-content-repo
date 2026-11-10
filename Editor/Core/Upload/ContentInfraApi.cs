@@ -32,6 +32,7 @@ namespace ContentRepo.Editor
                        $" --template-file \"{templateAbsPath}\"" +
                        $" --stack-name {StackName}" +
                        $" --parameter-overrides BucketName={settings.S3BucketName} Region={settings.S3Region}" +
+                       $" \"StagingPrefix={settings.StagingPrefix}\" \"ProductionPrefix={settings.ProductionPrefix}\"" +
                        $" --capabilities CAPABILITY_NAMED_IAM" +
                        $" --no-fail-on-empty-changeset" +
                        $" --region {settings.S3Region}";
