@@ -191,7 +191,7 @@ namespace ContentRepo.Editor
         private void WireFolderTab()
         {
             refreshBtn.clicked += () => _ = RunAsync("Refreshing…", () => RefreshManifestsAsync(sync: false));
-            pullAllBtn.clicked += () => _ = RunAsync("Pulling all…", ContentGitApi.PullAllAsync);
+            pullAllBtn.clicked += () => _ = RunAsync("Pulling all…", () => ContentGitApi.PullAllAsync(ConfirmUseIncoming), dialogOnError: true);
             initBtn.clicked    += () => _ = RunAsync("Initializing…", ContentGitApi.InitAsync);
             abortOperationBtn.clicked += () =>
             {
@@ -551,7 +551,7 @@ namespace ContentRepo.Editor
             if (uploadAllBtn == null || promoteAllBtn == null) return;
             var platform = EditorUserBuildSettings.activeBuildTarget.ToString();
 
-            pullAllBtn.style.display  = checkedOutFolders.Any(f => repoFolders.Contains(f))
+            pullAllBtn.style.display  = checkedOutFolders.Any(f => repoFolders.Contains(f)) && operationInProgress == null && !unresolvedConflicts
                 ? DisplayStyle.Flex : DisplayStyle.None;
             buildAllBtn.style.display = checkedOutFolders.Count > 0
                 ? DisplayStyle.Flex : DisplayStyle.None;
@@ -950,7 +950,8 @@ namespace ContentRepo.Editor
                 ApplyBadgeState(badge, isCheckedOut, s);
                 AddSyncBadges(badge, folder, stgId, prdId);
                 var dirty               = isCheckedOut && !s.IsClean;
-                pullBtn.style.display       = isCheckedOut && ContentGitApi.RepositoryBehind > 0 ? DisplayStyle.Flex : DisplayStyle.None;
+                pullBtn.style.display       = isCheckedOut && ContentGitApi.RepositoryBehind > 0 && operationInProgress == null && !unresolvedConflicts
+                    ? DisplayStyle.Flex : DisplayStyle.None;
                 pushBtn.style.display       = dirty ? DisplayStyle.Flex : DisplayStyle.None;
                 expandBtn.style.display     = dirty ? DisplayStyle.Flex : DisplayStyle.None;
                 disconnectBtn.style.display = isCheckedOut && !dirty && isOnRemote ? DisplayStyle.Flex : DisplayStyle.None;
@@ -975,7 +976,7 @@ namespace ContentRepo.Editor
                 fileList.style.display = expanded ? DisplayStyle.Flex : DisplayStyle.None;
                 if (expanded) RebuildFileList();
             };
-            pullBtn.clicked += () => _ = RunAsync($"Pulling '{folder}'…", () => ContentGitApi.PullFolderAsync(folder));
+            pullBtn.clicked += () => _ = RunAsync($"Pulling '{folder}'…", () => ContentGitApi.PullFolderAsync(folder, ConfirmUseIncoming), dialogOnError: true);
 
             void EnterRenameMode()
             {
@@ -1331,7 +1332,8 @@ namespace ContentRepo.Editor
 
         private async System.Threading.Tasks.Task PullThenShowLostChangesAsync(string package)
         {
-            if (await RunAsync($"Pulling '{package}'…", () => ContentGitApi.PullFolderAsync(package), dialogOnError: true))
+            if (await RunAsync($"Pulling '{package}'…", () => ContentGitApi.PullFolderAsync(package, ConfirmUseIncoming), dialogOnError: true)
+                || lastRunCancelled)
                 await ShowLostChangesAsync(package);
         }
 
@@ -1350,19 +1352,46 @@ namespace ContentRepo.Editor
 
         // ── Async runners ─────────────────────────────────────────────────────
 
+        private bool lastRunCancelled;
+
+        private static bool ConfirmUseIncoming(IReadOnlyList<ContentPullClash> clashes)
+        {
+            var list = string.Join("\n", clashes.Take(8).Select(clash => $"• {clash.Path} ({clash.Reason})"));
+            if (clashes.Count > 8) list += $"\n• … and {clashes.Count - 8} more";
+            return EditorUtility.DisplayDialog("Pull",
+                $"You changed {(clashes.Count == 1 ? "a file" : $"{clashes.Count} files")} that a teammate also changed:\n\n{list}\n\n" +
+                "Use the team's version? A copy of yours is kept in Library/ContentRepo/Backups first, so nothing is lost. " +
+                "To keep yours instead, cancel and ask for help.",
+                "Use the team's version", "Cancel");
+        }
+
+        /// <summary>
+        /// Runs a repository operation with the window busy, then refreshes. An error or a cancellation stays in the
+        /// status bar after the refresh instead of being replaced by "Ready". Returns whether the operation succeeded.
+        /// </summary>
         private async Task<bool> RunAsync(string statusMessage, Func<Task> op, bool dialogOnError = false)
         {
             if (busy) return false;
             ContentGitApi.ClearLastWarning();
             SetBusy(true, statusMessage);
-            try { await op(); }
+            string outcome = null;
+            var succeeded = false;
+            lastRunCancelled = false;
+            try
+            {
+                await op();
+                succeeded = true;
+            }
+            catch (OperationCanceledException ex)
+            {
+                outcome = ex.Message;
+                lastRunCancelled = true;
+            }
             catch (Exception ex)
             {
-                SetStatus($"Error: {ex.Message}");
+                outcome = $"Error: {ex.Message}";
                 Debug.LogException(ex);
-                SetBusy(false);
                 if (dialogOnError) EditorUtility.DisplayDialog("Content Browser", ex.Message, "OK");
-                return false;
             }
             try
             {
@@ -1371,11 +1400,15 @@ namespace ContentRepo.Editor
                 await RefreshSyncAsync();
                 Rebuild();
                 UpdateToolbarVisibility();
-                SetStatus(!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready");
+                SetStatus(outcome ?? (!string.IsNullOrEmpty(ContentGitApi.LastWarning) ? $"⚠ {ContentGitApi.LastWarning}" : "Ready"));
             }
-            catch (Exception ex) { SetStatus($"Error: {ex.Message}"); Debug.LogException(ex); }
+            catch (Exception ex)
+            {
+                SetStatus(outcome ?? $"Error: {ex.Message}");
+                Debug.LogException(ex);
+            }
             finally { SetBusy(false); }
-            return true;
+            return succeeded;
         }
 
         private async Task RunPipelineAsync(string statusMessage, Func<Task> op, Label log)

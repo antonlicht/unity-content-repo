@@ -51,6 +51,7 @@ Several people change content at the same time. These habits keep everyone's wor
 - Working on two computers? Pull on each one before you change anything.
 - Tell the team when you work on a package, so two people do not change the same files at once.
 - Only discard changes you made yourself.
+- Pull keeps your own changes when it can. If a teammate changed the same part of a file, it asks whether to use their version and keeps a copy of yours in Library/ContentRepo/Backups.
 - A package shows the red **repo lost changes** badge? Do not build, upload or promote it until the lost work is back.
 
 > Something looks wrong in the Content Browser?

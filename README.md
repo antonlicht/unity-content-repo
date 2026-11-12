@@ -72,6 +72,12 @@ track an empty folder, so the package is pushed to the remote when you first **c
 `Refresh` re-reads remote and local state. `Pull all` pulls every checked-out folder. Package status
 is polled about once a minute.
 
+Local changes do not block a pull. For each changed file that the incoming commits also change, Pull (and
+the pull that Check out does) drops the local change when the incoming version already contains it, and
+puts it back on top of the pulled version when the two merge cleanly. For the rest it asks whether to use
+the team's version, listing the files; Cancel pulls nothing. Every local version it touches is copied to
+`Library/ContentRepo/Backups/<time>-pull` first and put back if the pull fails.
+
 Status badges per row:
 
 | Badge | Meaning |

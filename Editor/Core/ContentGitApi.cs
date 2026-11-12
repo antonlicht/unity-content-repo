@@ -43,6 +43,13 @@ namespace ContentRepo.Editor
         }
     }
 
+    /// <summary>A file a pull would overwrite whose local change cannot be kept automatically, and why.</summary>
+    public sealed class ContentPullClash
+    {
+        public string Path;
+        public string Reason;
+    }
+
     public readonly struct GitResult
     {
         public readonly int ExitCode;
@@ -477,9 +484,7 @@ namespace ContentRepo.Editor
             try
             {
                 await RunGitCommandAsync($"sparse-checkout add {Quote(folder)}", ContentAbsolutePath);
-                await TryRemoteAsync("pull", () => RunGitCommandAsync(
-                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                    ContentAbsolutePath));
+                await TryRemoteAsync("pull", () => PullOverLocalChangesAsync(null));
 
                 var stopped = await GetOperationInProgressAsync() ?? (await HasUnresolvedConflictsAsync() ? "conflict" : null);
                 if (stopped != null)
@@ -863,7 +868,12 @@ namespace ContentRepo.Editor
             return folders.Any(f => f.Equals(folder, StringComparison.OrdinalIgnoreCase));
         }
 
-        public static async Task PullFolderAsync(string folder)
+        /// <summary>
+        /// Pulls the branch. Local changes to files the pull also changes no longer stop it: see
+        /// <see cref="PullOverLocalChangesAsync"/>. <paramref name="useIncoming"/> is asked about changes that cannot
+        /// be kept automatically; without it, or when it returns false, nothing is pulled.
+        /// </summary>
+        public static async Task PullFolderAsync(string folder, Func<IReadOnlyList<ContentPullClash>, bool> useIncoming = null)
         {
             ValidateFolderName(folder);
             await RepairIndexAsync();
@@ -873,9 +883,7 @@ namespace ContentRepo.Editor
             AssetDatabase.StartAssetEditing();
             try
             {
-                await RunGitCommandAsync(
-                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                    ContentAbsolutePath);
+                await PullOverLocalChangesAsync(useIncoming);
             }
             finally
             {
@@ -1113,7 +1121,7 @@ namespace ContentRepo.Editor
                 ContentAbsolutePath);
         }
 
-        public static async Task PullAllAsync()
+        public static async Task PullAllAsync(Func<IReadOnlyList<ContentPullClash>, bool> useIncoming = null)
         {
             await RepairIndexAsync();
             // Suspend Unity's importer while git rewrites the working tree (see PullFolderAsync) so a
@@ -1121,9 +1129,7 @@ namespace ContentRepo.Editor
             AssetDatabase.StartAssetEditing();
             try
             {
-                await RunGitCommandAsync(
-                    $"pull origin {Quote(ContentRepoSettings.instance.Branch)}",
-                    ContentAbsolutePath);
+                await PullOverLocalChangesAsync(useIncoming);
             }
             finally
             {
@@ -1131,6 +1137,256 @@ namespace ContentRepo.Editor
                 AssetDatabase.StopAssetEditing();
                 NotifyChange();
                 AssetDatabase.Refresh();
+            }
+        }
+
+        private sealed class PullPlanEntry
+        {
+            public string Path;
+            public string IncomingPath;
+            public bool Tracked;
+            public bool LocalExists;
+            public string OurBlob;
+            public string IndexEntry;
+            public byte[] Merged;
+            public string Clash;
+        }
+
+        /// <summary>
+        /// Pulls the branch even when files it changes have local changes, which git refuses on its own. This only
+        /// happens when the pull is a fast-forward, and it merges exactly the commit it checked. A local change the
+        /// incoming version already contains is dropped; one that merges cleanly is put back on top of the pulled
+        /// version; for the rest <paramref name="useIncoming"/> decides whether the incoming version replaces them (no
+        /// callback, or false: nothing is pulled). Every local version this touches is copied to
+        /// Library/ContentRepo/Backups first, and put back, with its staged state, if the pull fails. When this copy has
+        /// commits that were never pushed, the pull runs as before and refuses if those files overlap.
+        /// </summary>
+        private static async Task PullOverLocalChangesAsync(Func<IReadOnlyList<ContentPullClash>, bool> useIncoming)
+        {
+            await ThrowIfOperationInProgressAsync("pull");
+            var root = ContentAbsolutePath;
+            var branch = ContentRepoSettings.instance.Branch;
+            await RunGitCommandAsync($"fetch origin {Quote(branch)}", root);
+            var incoming = (await RunGitCommandAsync($"rev-parse --verify {Quote("refs/remotes/origin/" + branch)}", root)).Trim();
+            if (await IsAncestorAsync(incoming, "HEAD", root)) return;
+
+            var ignoreCase = string.Equals((await RunGitAsync("config --bool core.ignorecase", root)).Output.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+            if (!await IsAncestorAsync("HEAD", incoming, root))
+            {
+                var overlapping = (await LocalChangesTouchedByAsync($"HEAD...{incoming}", ignoreCase, root)).Keys.ToList();
+                if (overlapping.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Nothing was pulled: this copy has commits that were never pushed, and teammates changed {overlapping.Count} file(s) " +
+                        $"you are also changing, for example {overlapping[0]}. Ask for help to combine them.");
+                await RunGitCommandAsync($"pull origin {Quote(branch)}", root);
+                return;
+            }
+
+            var merge = $"merge --ff-only {incoming}";
+            var plan = await PlanPullOverLocalChangesAsync(incoming, ignoreCase, root);
+            if (plan.Count == 0)
+            {
+                await RunGitCommandAsync(merge, root);
+                return;
+            }
+
+            var clashes = plan.Where(entry => entry.Clash != null)
+                .Select(entry => new ContentPullClash { Path = entry.Path, Reason = entry.Clash })
+                .ToList();
+            if (clashes.Count > 0 && useIncoming == null)
+                throw new InvalidOperationException(
+                    $"Nothing was pulled: your changes to {clashes.Count} file(s) clash with what teammates pushed, for example " +
+                    $"{clashes[0].Path} ({clashes[0].Reason}).");
+            if (clashes.Count > 0 && !useIncoming(clashes))
+                throw new OperationCanceledException("Pull cancelled. Nothing was changed.");
+
+            var backup = BackupFilesKeepingFolders(plan.Where(entry => entry.LocalExists).Select(entry => entry.Path), "pull");
+            foreach (var entry in plan)
+            {
+                var now = File.Exists(Path.Combine(root, entry.Path))
+                    ? (await RunGitCommandAsync($"hash-object -- {Quote(entry.Path)}", root)).Trim()
+                    : null;
+                if (now != entry.OurBlob)
+                    throw new OperationCanceledException($"{entry.Path} changed while pulling, so nothing was pulled. Pull again.");
+            }
+
+            try
+            {
+                foreach (var batch in ContentSyncApi.Batches(plan.Where(entry => entry.Tracked).Select(entry => entry.Path), 100))
+                    await RunGitCommandAsync($"checkout HEAD -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
+                foreach (var batch in ContentSyncApi.Batches(plan.Where(entry => !entry.Tracked && entry.IndexEntry != null).Select(entry => entry.Path), 100))
+                    await RunGitCommandAsync($"rm --cached -q --ignore-unmatch -- {string.Join(" ", batch.Select(ContentSyncApi.Literal))}", root);
+                foreach (var entry in plan.Where(entry => !entry.Tracked && entry.LocalExists))
+                    File.Delete(Path.Combine(root, entry.Path));
+                await RunGitCommandAsync(merge, root);
+            }
+            catch (Exception ex)
+            {
+                try { await RestoreLocalVersionsAsync(plan, backup, root); }
+                catch (Exception restoreError)
+                {
+                    throw new InvalidOperationException(
+                        $"The pull failed and your changed files could not all be put back. Copies of them are in {backup}. " +
+                        $"{ex.Message} {restoreError.Message}", ex);
+                }
+                throw new InvalidOperationException($"The pull failed, so your changed files were put back as they were. {ex.Message}", ex);
+            }
+
+            foreach (var entry in plan.Where(entry => entry.Merged != null))
+                File.WriteAllBytes(Path.Combine(root, entry.Path), entry.Merged);
+            var kept = plan.Count(entry => entry.Merged != null);
+            var contained = plan.Count - kept - clashes.Count;
+            var notes = new List<string>();
+            if (kept > 0) notes.Add($"Your changes to {kept} file(s) were kept on top of the team's version.");
+            if (clashes.Count > 0) notes.Add($"The team's version replaced your changes to {clashes.Count} file(s); your versions are in {backup}.");
+            if (notes.Count > 0) LastWarning = string.Join(" ", notes);
+            UnityEngine.Debug.Log($"[ContentRepo] Pulled over local changes: {contained} already in the pulled version, {kept} kept on top of it, " +
+                                  $"{clashes.Count} replaced by the team's version. Copies of the local versions are in {backup}.");
+        }
+
+        private static async Task<bool> IsAncestorAsync(string ancestor, string descendant, string root) =>
+            (await RunGitAsync($"merge-base --is-ancestor {ancestor} {descendant}", root)).ExitCode == 0;
+
+        /// <summary>
+        /// The local changes (tracked, staged or untracked) to files that <paramref name="range"/> changes, keyed by the
+        /// local path, with the path as the range spells it (they differ only in case when git ignores case).
+        /// </summary>
+        private static async Task<Dictionary<string, string>> LocalChangesTouchedByAsync(string range, bool ignoreCase, string root)
+        {
+            var comparer = ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var changed = new Dictionary<string, string>(comparer);
+            foreach (var path in SplitPaths(await RunGitCommandAsync($"-c core.quotepath=off diff --name-only --no-renames {range}", root)))
+                changed[path] = path;
+            var touched = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (changed.Count == 0) return touched;
+            foreach (var path in SplitPaths(await RunGitCommandAsync("-c core.quotepath=off diff --name-only --no-renames HEAD", root))
+                         .Concat(SplitPaths(await RunGitCommandAsync("-c core.quotepath=off diff --name-only --no-renames --cached HEAD", root)))
+                         .Concat(SplitPaths(await RunGitCommandAsync("-c core.quotepath=off ls-files --others --exclude-standard", root))))
+                if (changed.TryGetValue(path, out var spelling)) touched[path] = spelling;
+            return touched;
+        }
+
+        private static async Task<List<PullPlanEntry>> PlanPullOverLocalChangesAsync(string incoming, bool ignoreCase, string root)
+        {
+            var plan = new List<PullPlanEntry>();
+            foreach (var pair in await LocalChangesTouchedByAsync($"HEAD {incoming}", ignoreCase, root))
+            {
+                var path = pair.Key;
+                var localExists = File.Exists(Path.Combine(root, path));
+                var baseBlob = await BlobAtAsync("HEAD", path, root);
+                var theirBlob = await BlobAtAsync(incoming, pair.Value, root);
+                var ourBlob = localExists ? (await RunGitCommandAsync($"hash-object -w -- {Quote(path)}", root)).Trim() : null;
+                var staged = (await RunGitCommandAsync($"-c core.quotepath=off ls-files -s -- {ContentSyncApi.Literal(path)}", root)).Trim();
+                var fields = staged.Split('\t')[0].Split(' ');
+                var entry = new PullPlanEntry
+                {
+                    Path = path,
+                    IncomingPath = pair.Value,
+                    Tracked = baseBlob != null,
+                    LocalExists = localExists,
+                    OurBlob = ourBlob,
+                    IndexEntry = fields.Length >= 3 && fields[2] == "0" ? $"{fields[0]},{fields[1]}" : null,
+                };
+                plan.Add(entry);
+                if (ourBlob == theirBlob) continue;
+                if (ourBlob == null) entry.Clash = "you deleted it, a teammate changed it";
+                else if (theirBlob == null) entry.Clash = "a teammate deleted it, you changed it";
+                else if (baseBlob == null) entry.Clash = "you and a teammate both added it";
+                else
+                {
+                    var theirs = await ReadBlobAsync(theirBlob, root);
+                    var merged = await MergeTextAsync(await ReadBlobAsync(ourBlob, root), await ReadBlobAsync(baseBlob, root), theirs, root);
+                    if (merged == null) entry.Clash = "you and a teammate changed the same part";
+                    else if (!merged.SequenceEqual(theirs)) entry.Merged = merged;
+                }
+            }
+            return plan;
+        }
+
+        private static async Task<string> BlobAtAsync(string revision, string path, string root)
+        {
+            var line = (await RunGitCommandAsync($"-c core.quotepath=off ls-tree {revision} -- {Quote(path)}", root)).Trim();
+            var fields = line.Split('\t')[0].Split(' ');
+            return fields.Length >= 3 && fields[1] == "blob" ? fields[2] : null;
+        }
+
+        /// <summary>A three-way merge of text files, or null when they conflict or one of them is binary.</summary>
+        private static async Task<byte[]> MergeTextAsync(byte[] ours, byte[] ancestor, byte[] theirs, string root)
+        {
+            static bool Binary(byte[] data) => Array.IndexOf(data, (byte)0, 0, Math.Min(data.Length, 8000)) >= 0;
+            if (Binary(ours) || Binary(ancestor) || Binary(theirs)) return null;
+            var folder = Path.Combine(Path.GetTempPath(), "content-repo-merge-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+            try
+            {
+                File.WriteAllBytes(Path.Combine(folder, "ours"), ours);
+                File.WriteAllBytes(Path.Combine(folder, "base"), ancestor);
+                File.WriteAllBytes(Path.Combine(folder, "theirs"), theirs);
+                var (exitCode, output) = await RunGitBytesAsync(
+                    $"merge-file -p --quiet {Quote(Path.Combine(folder, "ours"))} {Quote(Path.Combine(folder, "base"))} {Quote(Path.Combine(folder, "theirs"))}", root);
+                return exitCode == 0 ? output : null;
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+
+        private static async Task<byte[]> ReadBlobAsync(string blob, string root)
+        {
+            var (exitCode, output) = await RunGitBytesAsync($"cat-file blob {blob}", root);
+            if (exitCode != 0) throw new InvalidOperationException($"git cat-file blob {blob} failed (exit {exitCode}).");
+            return output;
+        }
+
+        /// <summary>Runs git and returns its exact output bytes (RunGitAsync reads text lines and changes line endings).</summary>
+        private static Task<(int ExitCode, byte[] Output)> RunGitBytesAsync(string args, string root) => Task.Run(() =>
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = root,
+            };
+            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'git'.");
+            var error = process.StandardError.ReadToEndAsync();
+            using var output = new MemoryStream();
+            process.StandardOutput.BaseStream.CopyTo(output);
+            process.WaitForExit();
+            _ = error.Result;
+            return (process.ExitCode, output.ToArray());
+        });
+
+        private static string BackupFilesKeepingFolders(IEnumerable<string> repoRelativePaths, string reason)
+        {
+            var backupDir = Path.Combine(ProjectRoot, "Library", "ContentRepo", "Backups", $"{DateTime.Now:yyyyMMdd-HHmmss-fff}-{reason}");
+            foreach (var rel in repoRelativePaths)
+            {
+                var source = Path.Combine(ContentAbsolutePath, rel);
+                if (!File.Exists(source)) continue;
+                var target = Path.Combine(backupDir, rel.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(source, target, true);
+            }
+            return backupDir;
+        }
+
+        private static async Task RestoreLocalVersionsAsync(List<PullPlanEntry> plan, string backup, string root)
+        {
+            foreach (var entry in plan)
+            {
+                var full = Path.Combine(root, entry.Path);
+                if (entry.LocalExists)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                    File.Copy(Path.Combine(backup, entry.Path.Replace('/', Path.DirectorySeparatorChar)), full, true);
+                }
+                else if (File.Exists(full)) File.Delete(full);
+                if (entry.IndexEntry != null)
+                    await RunGitCommandAsync($"update-index --add --cacheinfo {Quote(entry.IndexEntry + "," + entry.Path)}", root);
+                else
+                    await RunGitCommandAsync($"rm --cached -q --ignore-unmatch -- {ContentSyncApi.Literal(entry.Path)}", root);
             }
         }
 
