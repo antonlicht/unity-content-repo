@@ -7,6 +7,8 @@ Each developer checks out only the content package folders they need. Assets are
 uploaded to a CDN (S3 + CloudFront), and loaded at runtime via a master manifest — without bundling
 any content into the player build.
 
+**Case study:** [What Does Your Build Pipeline Cost You?](https://antonlicht.com/writing/build-pipeline-cost)
+
 **Package name:** `com.antonlicht.content-repo`
 
 ---
@@ -258,9 +260,56 @@ for the config-driven bootstrap option.
 
 ---
 
+## Expected AWS cost
+
+For most projects the backend costs well under $1 a month. The only cost that grows with the game is
+players downloading content.
+
+**Backend** (example: 5 GB of content)
+
+| Part | Price | Per month |
+|---|---|---|
+| S3 storage | $0.0245 per GB (eu-central-1) | $0.25–$0.40 |
+| S3 requests (uploads, cleanup) | $0.0054 per 1,000 files written | under $0.01 |
+| Cleanup Lambda (one short run a day) | within the always-free tier | $0 |
+| EventBridge schedule, IAM, CloudFormation | free | $0 |
+
+The bucket stores about 2–3× the content size: the live builds, the current staging build (older ones
+are pruned on upload) and production builds replaced in the last 30 days, for each platform.
+
+**Player downloads** (CloudFront)
+
+| Monthly traffic | Price | Example |
+|---|---|---|
+| Reading from S3, first 1,000 invalidation paths | free | $0 |
+| First 1 TB and 10 million requests | free, no expiry | 2,000 players × 500 MB: $0 |
+| Above 1 TB, pay-as-you-go | $0.085 per GB in North America and Europe, up to $0.12 in parts of Asia | 10,000 players × 500 MB: about $340 |
+| Flat-rate Pro plan instead | $15 a month for up to 50 TB and 10 million requests, no overage charges | 10,000 players × 500 MB: $15 |
+
+Git hosting for the content repository is not included. AWS list prices as of November 2026; check
+[S3](https://aws.amazon.com/s3/pricing/) and [CloudFront](https://aws.amazon.com/cloudfront/pricing/)
+pricing for your region.
+
+---
+
 ## Requirements
 
 - Unity 6000.0 or newer.
 - `com.unity.addressables` 2.9.1 or newer.
 - `git` available on the system `PATH`.
 - AWS CLI on `PATH` for upload operations. See [Setup-AWS.md](Documentation/Setup-AWS.md).
+
+---
+
+## License
+
+Copyright (c) 2026 Anton Licht. All rights reserved. The source is published to read and learn from;
+using it in a project needs permission. See [LICENSE.md](LICENSE.md), and get in touch through
+[antonlicht.com](https://antonlicht.com).
+
+---
+
+## Third-party notices
+
+The editor icons are [Lucide](https://lucide.dev) icons (ISC License; `plus`, `trash` and `x` derive from
+Feather, MIT License). See [Third Party Notices.md](Third%20Party%20Notices.md).

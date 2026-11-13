@@ -5,8 +5,10 @@
   "description": "Editor tooling for managing a shared content repository via git sparse-checkout, plus an Addressables build, CDN upload, and local-dev-override pipeline. Developers check out only the folders they need, build per-package Addressables bundles, publish to a CDN behind a master manifest, and can test local changes without deploying via AssetDatabase (Fast Mode) or local-bundle overrides.",
   "unity": "6000.0",
   "author": {
-    "name": "Anton Licht"
+    "name": "Anton Licht",
+    "url": "https://antonlicht.com"
   },
+  "license": "See LICENSE.md file",
   "dependencies": {
     "com.unity.addressables": "2.9.1"
   },
